@@ -13,8 +13,8 @@ struct LikeWindowsApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            EmptyView()
         }
-        .defaultSize(width: 500, height: 680)
+        .defaultLaunchBehavior(.suppressed)
     }
 }

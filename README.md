@@ -2,6 +2,26 @@
 
 一款 macOS 效率工具，让 Dock 的操作体验更接近 Windows 任务栏。
 
+## 界面预览
+
+### 偏好设置
+
+![偏好设置界面](docs/images/preferences.png)
+
+集中管理各项功能开关：快速显示/隐藏、Dock 信息弹窗、系统窗口排序与登录时自动启动。顶部状态栏实时显示辅助功能授权与后台监听状态。
+
+### Dock 信息弹窗
+
+悬停 Dock 图标即可预览该应用的全部窗口，支持 Windows 风格的窗口控制按钮。
+
+**多窗口浏览器（Google Chrome）** — 列出前台与已最小化窗口，可直接切换或操作：
+
+![Dock 信息弹窗 - Google Chrome](docs/images/dock-popup-chrome.png)
+
+**多窗口访达（Finder）** — 展示多个 Finder 窗口，悬停高亮当前条目，点击即可切换：
+
+![Dock 信息弹窗 - 访达](docs/images/dock-popup-finder.png)
+
 ## 功能
 
 ### 快速显示/隐藏
@@ -24,7 +44,7 @@
 
 ## 系统要求
 
-- macOS 26.2 或更高版本
+- macOS 18 或更高版本
 - 需要授予**辅助功能**权限（系统设置 → 隐私与安全性 → 辅助功能）
 
 ## 从源码构建
@@ -74,20 +94,18 @@ hdiutil create -volname "如窗" -srcfolder build/dmg-staging \
   -ov -format UDZO build/export/LikeWindows.dmg
 ```
 
-### 发布到 GitHub Releases
-
-将生成的 `.dmg` 上传到 [Releases](https://github.com/gamehero2017/LikeWindows/releases) 即可供用户下载。对外公开分发时，建议对应用进行签名与公证，避免其他 Mac 被 Gatekeeper 拦截。
-
 ## 使用说明
 
 1. 启动应用后，在偏好设置中开启所需功能
 2. 若提示权限不足，点击「打开辅助功能设置」并为如窗授权
 3. 授权后功能即可在后台生效
 
-| 场景 | 操作 |
-|------|------|
-| 单窗口应用 | 前台点击 Dock 图标隐藏窗口，再次点击恢复 |
+
+| 场景    | 操作                         |
+| ----- | -------------------------- |
+| 单窗口应用 | 前台点击 Dock 图标隐藏窗口，再次点击恢复    |
 | 多窗口应用 | 悬停 Dock 图标查看全部窗口，移开鼠标后弹窗消失 |
+
 
 ## 技术栈
 

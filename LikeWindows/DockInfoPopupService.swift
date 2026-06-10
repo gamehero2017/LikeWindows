@@ -12,17 +12,23 @@ let useSystemWindowOrderKey = "useSystemWindowOrderEnabled"
 final class DockInfoPopupService: NSObject {
     static let shared = DockInfoPopupService()
 
-    private static let activeFallbackPollInterval: TimeInterval = 0.5
+    private static let activeFallbackPollInterval: TimeInterval = 0.9
     private static let popupRefreshInterval: TimeInterval = 0.4
-    private static let idleFallbackPollInterval: TimeInterval = 1.0
-    private static let mouseMoveThreshold: CGFloat = 2.0
+    private static let mouseMoveThreshold: CGFloat = 5.0
+    private static let hoverProcessInterval: CFTimeInterval = 1.0 / 15.0
+    private static let dockSwitchDebounce: TimeInterval = 0.1
+
+    private enum MonitoringPhase {
+        case idle
+        case active
+    }
 
     private var panel: NSPanel?
     private var hostingView: NSHostingView<DockInfoPopupView>?
     private var popupModel: DockInfoPopupModel?
-    private var hoverTimer: Timer?
-    private var idleMouseMonitor: Any?
-    private var activeMouseMonitor: Any?
+    private var fallbackTimer: Timer?
+    private var mouseMonitor: Any?
+    private var monitoringPhase: MonitoringPhase = .idle
     private var currentTargetPID: pid_t?
     private var currentIconRect: CGRect?
     private var cachedHoverTarget: DockTarget?
@@ -32,6 +38,10 @@ final class DockInfoPopupService: NSObject {
     private var isMouseNearDock = false
     private var lastPopupRefreshTime: TimeInterval = 0
     private var lastWindowStateSignature: String?
+    private var pendingPresentTarget: DockTarget?
+    private var isPresentQueued = false
+    private var lastHoverProcessTime: CFTimeInterval = 0
+    private var lastDockSwitchTime: TimeInterval = 0
 
     var isPopupVisible: Bool {
         isPopupPresented
@@ -44,6 +54,14 @@ final class DockInfoPopupService: NSObject {
     func refreshMonitoring() {
         runOnMain { [weak self] in
             self?.restartHoverMonitorIfNeeded()
+        }
+    }
+
+    /// 关闭全部鼠标监听与轮询（功能关闭或深度休眠时调用）
+    func suspendMonitoring() {
+        runOnMain { [weak self] in
+            self?.stopAllMonitoring()
+            self?.dismissImmediatelyOnMain()
         }
     }
 
@@ -64,7 +82,7 @@ final class DockInfoPopupService: NSObject {
     func stop() {
         runOnMain { [weak self] in
             guard let self else { return }
-            self.enterIdleMonitoring()
+            self.stopAllMonitoring()
             self.dismissImmediatelyOnMain()
             self.isStarted = false
         }
@@ -79,6 +97,12 @@ final class DockInfoPopupService: NSObject {
         }
     }
 
+    private var isMonitoringEnabled: Bool {
+        isStarted
+            && UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey)
+            && QuickShowHideService.shared.isAccessibilityGranted
+    }
+
     private func restartHoverMonitorIfNeeded() {
         guard Thread.isMainThread else {
             runOnMain { [weak self] in
@@ -87,13 +111,15 @@ final class DockInfoPopupService: NSObject {
             return
         }
 
-        enterIdleMonitoring()
-
-        guard isStarted,
-              UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey),
-              QuickShowHideService.shared.isAccessibilityGranted else {
+        guard isMonitoringEnabled else {
+            stopAllMonitoring()
+            if !UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey) {
+                dismissImmediatelyOnMain()
+            }
             return
         }
+
+        ensureMouseMonitor()
 
         let mouse = NSEvent.mouseLocation
         let nearDock = QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse)
@@ -102,83 +128,96 @@ final class DockInfoPopupService: NSObject {
         if isPopupPresented || nearDock {
             enterActiveMonitoring()
             processHover(at: mouse)
+        } else {
+            enterIdleMonitoring()
         }
     }
 
-    private func scheduleHoverTimer(interval: TimeInterval) {
-        hoverTimer?.invalidate()
-        hoverTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            self?.pollMouseHover()
-        }
-        if let hoverTimer {
-            RunLoop.main.add(hoverTimer, forMode: .common)
-        }
-    }
-
-    private func stopActivePolling() {
-        hoverTimer?.invalidate()
-        hoverTimer = nil
-    }
-
-    private func enterIdleMonitoring() {
-        exitActiveMonitoring()
-        stopActivePolling()
+    private func stopAllMonitoring() {
+        removeMouseMonitor()
+        stopFallbackPoll()
+        monitoringPhase = .idle
         cachedHoverTarget = nil
-
-        guard idleMouseMonitor == nil else { return }
-
-        idleMouseMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
-        ) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.wakeFromIdleIfNearDock()
-            }
-        }
-
-        if idleMouseMonitor == nil {
-            scheduleHoverTimer(interval: Self.idleFallbackPollInterval)
-        }
-    }
-
-    private func exitIdleMonitoring() {
-        if let idleMouseMonitor {
-            NSEvent.removeMonitor(idleMouseMonitor)
-            self.idleMouseMonitor = nil
-        }
-    }
-
-    private func enterActiveMonitoring() {
-        exitIdleMonitoring()
-        installActiveMouseMonitorIfNeeded()
-        scheduleHoverTimer(interval: Self.activeFallbackPollInterval)
-    }
-
-    private func exitActiveMonitoring() {
-        stopActivePolling()
-        if let activeMouseMonitor {
-            NSEvent.removeMonitor(activeMouseMonitor)
-            self.activeMouseMonitor = nil
-        }
+        isMouseNearDock = false
         lastMouseLocation = nil
     }
 
-    private func installActiveMouseMonitorIfNeeded() {
-        guard activeMouseMonitor == nil else { return }
+    private func ensureMouseMonitor() {
+        guard mouseMonitor == nil else { return }
 
-        activeMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
         ) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.handleActiveMouseEvent()
-            }
+            // 监听器在主线程注册，回调也在主线程；避免 async 排队抢占弹窗内 onHover
+            self?.handleGlobalMouseMoved()
         }
     }
 
-    private func handleActiveMouseEvent() {
+    private func removeMouseMonitor() {
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
+    }
+
+    private func handleGlobalMouseMoved() {
         let mouse = NSEvent.mouseLocation
-        guard !shouldSkipMouseMove(to: mouse) else { return }
-        lastMouseLocation = mouse
-        processHover(at: mouse)
+
+        if isPopupPresented, isMouseOverPanel(mouse) {
+            return
+        }
+
+        switch monitoringPhase {
+        case .idle:
+            guard isMonitoringEnabled, !isPopupPresented else { return }
+            guard QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse) else { return }
+            isMouseNearDock = true
+            enterActiveMonitoring()
+            lastMouseLocation = mouse
+            processHover(at: mouse)
+
+        case .active:
+            guard !shouldSkipMouseMove(to: mouse) else { return }
+            lastMouseLocation = mouse
+
+            let now = CACurrentMediaTime()
+            guard now - lastHoverProcessTime >= Self.hoverProcessInterval else { return }
+            lastHoverProcessTime = now
+            processHover(at: mouse)
+        }
+    }
+
+    private func scheduleFallbackPoll(interval: TimeInterval) {
+        guard fallbackTimer == nil else { return }
+
+        fallbackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.fallbackTimer = nil
+            self.pollMouseHover()
+        }
+        if let fallbackTimer {
+            RunLoop.main.add(fallbackTimer, forMode: .common)
+        }
+    }
+
+    private func stopFallbackPoll() {
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
+    }
+
+    private func enterIdleMonitoring() {
+        monitoringPhase = .idle
+        stopFallbackPoll()
+        ensureMouseMonitor()
+    }
+
+    private func enterActiveMonitoring() {
+        if monitoringPhase == .idle {
+            QuickShowHideService.shared.prefetchDockEntriesCache()
+        }
+        monitoringPhase = .active
+        ensureMouseMonitor()
+        scheduleFallbackPoll(interval: Self.activeFallbackPollInterval)
     }
 
     private func shouldSkipMouseMove(to mouse: NSPoint) -> Bool {
@@ -188,28 +227,35 @@ final class DockInfoPopupService: NSObject {
         return (dx * dx + dy * dy) < Self.mouseMoveThreshold * Self.mouseMoveThreshold
     }
 
-    private func wakeFromIdleIfNearDock() {
-        guard isStarted,
-              UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey),
-              !isPopupPresented else {
-            return
-        }
-
-        let mouse = NSEvent.mouseLocation
-        guard QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse) else {
-            return
-        }
-
-        isMouseNearDock = true
-        enterActiveMonitoring()
-        processHover(at: mouse)
-    }
-
     private func presentOnMain(_ target: DockTarget) {
         guard UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey) else { return }
 
-        AppWindowInspector.invalidateWindowCache(for: target.processIdentifier)
-        let snapshot = AppWindowInspector.popupSnapshot(for: target.app, useCache: false)
+        // 弹窗已显示时同步切换内容，避免窗口标题列表落后鼠标
+        if isPopupPresented {
+            pendingPresentTarget = nil
+            presentTargetImmediately(target)
+            return
+        }
+
+        pendingPresentTarget = target
+        guard !isPresentQueued else { return }
+        isPresentQueued = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isPresentQueued = false
+            guard let target = self.pendingPresentTarget else { return }
+            self.pendingPresentTarget = nil
+            self.presentTargetImmediately(target)
+        }
+    }
+
+    private func presentTargetImmediately(_ target: DockTarget) {
+        if currentTargetPID != target.processIdentifier {
+            AppWindowInspector.invalidateWindowCache(for: target.processIdentifier)
+        }
+
+        let snapshot = AppWindowInspector.popupSnapshot(for: target.app, useCache: true)
         guard snapshot.shouldShow else { return }
 
         currentTargetPID = target.processIdentifier
@@ -334,6 +380,8 @@ final class DockInfoPopupService: NSObject {
     }
 
     private func dismissImmediatelyOnMain() {
+        pendingPresentTarget = nil
+
         guard isPopupPresented else { return }
 
         if let pid = currentTargetPID {
@@ -362,14 +410,22 @@ final class DockInfoPopupService: NSObject {
         }
 
         defer {
-            if isPopupPresented || isMouseNearDock {
-                enterActiveMonitoring()
+            if isMonitoringEnabled {
+                if isPopupPresented || isMouseNearDock {
+                    enterActiveMonitoring()
+                } else {
+                    enterIdleMonitoring()
+                }
             } else {
-                enterIdleMonitoring()
+                stopAllMonitoring()
             }
         }
 
-        guard UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey) else { return }
+        guard isMonitoringEnabled else { return }
+
+        if isPopupPresented, isMouseOverPanel(mouse) {
+            return
+        }
 
         let nearDock = QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse)
         isMouseNearDock = nearDock
@@ -391,16 +447,28 @@ final class DockInfoPopupService: NSObject {
             return
         }
 
+        guard nearDock else {
+            dismissImmediatelyOnMain()
+            return
+        }
+
         if isMouseOverCurrentIcon(mouse) {
             refreshCurrentPopupOnMain(force: false)
             return
         }
 
-        guard nearDock,
-              let target = dockTargetUnderMouse(mouse) else {
+        guard let target = dockTargetUnderMouse(mouse) else {
             dismissImmediatelyOnMain()
             return
         }
+
+        guard target.processIdentifier != currentTargetPID else {
+            return
+        }
+
+        let now = Date().timeIntervalSince1970
+        guard now - lastDockSwitchTime >= Self.dockSwitchDebounce else { return }
+        lastDockSwitchTime = now
 
         let snapshot = AppWindowInspector.popupSnapshot(for: target.app, useCache: true)
         guard snapshot.shouldShow else {
@@ -408,16 +476,15 @@ final class DockInfoPopupService: NSObject {
             return
         }
 
-        if target.processIdentifier != currentTargetPID {
-            presentOnMain(target)
-            return
-        }
-
-        dismissImmediatelyOnMain()
+        presentOnMain(target)
     }
 
     private func pollWhilePopupHidden(mouse: NSPoint) {
         guard let target = dockTargetUnderMouse(mouse) else { return }
+
+        if let currentPID = currentTargetPID, target.processIdentifier == currentPID, isPopupPresented {
+            return
+        }
 
         let snapshot = AppWindowInspector.popupSnapshot(for: target.app, useCache: true)
         guard snapshot.shouldShow else { return }
@@ -432,6 +499,14 @@ final class DockInfoPopupService: NSObject {
 
     private func isMouseOverCurrentIcon(_ mouse: NSPoint) -> Bool {
         guard currentTargetPID != nil else { return false }
+
+        if let iconRect = currentIconRect {
+            let cgMouse = QuickShowHideService.shared.cgPointFromCocoa(mouse)
+            if iconRect.insetBy(dx: -4, dy: -4).contains(cgMouse) {
+                return true
+            }
+        }
+
         guard let target = dockTargetUnderMouse(mouse),
               target.processIdentifier == currentTargetPID else {
             return false

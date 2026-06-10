@@ -60,6 +60,20 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
     private var isStarted = false
     private let stateLock = NSLock()
     private var preventAppNapActivity: NSObjectProtocol?
+    private var dockTargetCache: (target: DockTarget, location: CGPoint, timestamp: Date)?
+    private var regularAppsCache: ([NSRunningApplication], timestamp: Date)?
+    private var dockEntriesCache: [CachedDockEntry]?
+    private var dockEntriesCacheTimestamp: Date?
+
+    private static let dockTargetCacheTTL: TimeInterval = 0.3
+    private static let dockTargetCacheDistance: CGFloat = 8
+    private static let regularAppsCacheTTL: TimeInterval = 1.0
+    private static let dockEntriesCacheTTL: TimeInterval = 0.75
+
+    private struct CachedDockEntry {
+        let app: NSRunningApplication
+        let iconRect: CGRect
+    }
 
     private(set) var isEventTapActive = false
 
@@ -96,30 +110,25 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
             frontmostPID = frontApp.processIdentifier
         }
 
-        startPermissionTimer()
-        restartEventTapIfNeeded()
-        updatePreventAppNapIfNeeded()
+        applyRuntimeState()
     }
 
     func stop() {
         DispatchQueue.main.async { [weak self] in
-            self?.permissionTimer?.invalidate()
-            self?.permissionTimer = nil
-            self?.endPreventAppNapIfNeeded()
+            self?.enterDeepSleep()
         }
-        stopEventTap()
+        isStarted = false
     }
 
     @objc private func userDefaultsDidChange() {
         DispatchQueue.main.async { [weak self] in
-            self?.restartEventTapIfNeeded()
-            self?.updatePreventAppNapIfNeeded()
+            self?.applyRuntimeState()
         }
     }
 
     @objc private func workspaceDidWake() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.restartEventTapIfNeeded()
+            self?.applyRuntimeState()
         }
     }
 
@@ -132,10 +141,46 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         }
     }
 
-    private func startPermissionTimer() {
-        DispatchQueue.main.async { [weak self] in
-            self?.schedulePermissionTimer()
+    private func applyRuntimeState() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyRuntimeState()
+            }
+            return
         }
+
+        guard isStarted else { return }
+
+        guard isAnyFeatureEnabled else {
+            enterDeepSleep()
+            return
+        }
+
+        ensurePermissionTimerRunning()
+        restartEventTapIfNeeded()
+    }
+
+    private func enterDeepSleep() {
+        stopPermissionTimer()
+        stopEventTap()
+        endPreventAppNapIfNeeded()
+        DockInfoPopupService.shared.suspendMonitoring()
+    }
+
+    private func stopPermissionTimer() {
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+    }
+
+    private func ensurePermissionTimerRunning() {
+        guard isAnyFeatureEnabled else {
+            stopPermissionTimer()
+            return
+        }
+
+        guard permissionTimer == nil else { return }
+
+        schedulePermissionTimer()
     }
 
     private func schedulePermissionTimer() {
@@ -146,12 +191,20 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
             return
         }
 
+        guard isAnyFeatureEnabled else {
+            stopPermissionTimer()
+            return
+        }
+
         permissionTimer?.invalidate()
 
         let interval = permissionTimerInterval()
         permissionTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            self?.restartEventTapIfNeeded()
-            self?.schedulePermissionTimer()
+            guard let self else { return }
+            self.restartEventTapIfNeeded()
+            if self.isAnyFeatureEnabled {
+                self.schedulePermissionTimer()
+            }
         }
         if let permissionTimer {
             RunLoop.main.add(permissionTimer, forMode: .common)
@@ -181,24 +234,30 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
 
         guard isStarted else { return }
 
+        guard isAnyFeatureEnabled else {
+            enterDeepSleep()
+            return
+        }
+
         let trusted = AXIsProcessTrusted()
         stateLock.lock()
         let tapRunning = isEventTapActive
         stateLock.unlock()
 
         let working = trusted && (tapRunning || AccessibilityHealth.isWorking())
-        let shouldRun = isAnyFeatureEnabled && working
+        let shouldRunTap = working
 
-        if shouldRun {
+        if shouldRunTap {
             if !tapRunning {
                 startEventTap()
-                DockInfoPopupService.shared.refreshMonitoring()
             }
-            updatePreventAppNapIfNeeded()
+            DockInfoPopupService.shared.refreshMonitoring()
         } else {
             stopEventTap()
-            updatePreventAppNapIfNeeded()
+            DockInfoPopupService.shared.suspendMonitoring()
         }
+
+        updatePreventAppNapIfNeeded()
     }
 
     /// 静默检查权限，不弹出系统对话框
@@ -206,7 +265,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         _ = AXIsProcessTrusted()
         AccessibilityHealth.invalidate()
         DispatchQueue.main.async { [weak self] in
-            self?.restartEventTapIfNeeded()
+            self?.applyRuntimeState()
         }
     }
 
@@ -248,13 +307,41 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
     }
 
     func dockTarget(at location: CGPoint) -> DockTarget? {
+        if let cached = dockTargetCache,
+           Date().timeIntervalSince(cached.timestamp) < Self.dockTargetCacheTTL {
+            let dx = cached.location.x - location.x
+            let dy = cached.location.y - location.y
+            if (dx * dx + dy * dy) <= Self.dockTargetCacheDistance * Self.dockTargetCacheDistance {
+                return cached.target
+            }
+        }
+
+        if let target = dockTargetFromEntriesCache(at: location) {
+            dockTargetCache = (target, location, Date())
+            return target
+        }
+
         guard let dockItem = dockItem(at: location),
               let app = resolveRunningApp(for: dockItem)
                 ?? resolveRunningAppFromFrontmost(matching: dockItem),
               let iconRect = dockItemRect(dockItem) else {
+            dockTargetCache = nil
             return nil
         }
-        return DockTarget(app: app, iconRect: iconRect)
+
+        let target = DockTarget(app: app, iconRect: iconRect)
+        dockTargetCache = (target, location, Date())
+        return target
+    }
+
+    func prefetchDockEntriesCache() {
+        ensureDockEntriesCache(force: true)
+    }
+
+    func invalidateDockTargetCache() {
+        dockTargetCache = nil
+        dockEntriesCache = nil
+        dockEntriesCacheTimestamp = nil
     }
 
     func cgPointFromCocoa(_ point: NSPoint) -> CGPoint {
@@ -349,6 +436,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
 
     private func handleDockClickOnMain(at location: CGPoint) -> Bool {
         guard isClickLocationInDock(location) else { return false }
+        invalidateDockTargetCache()
         guard let target = dockTarget(at: location) else { return false }
 
         let popupEnabled = UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey)
@@ -377,12 +465,16 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
     }
 
     private func updatePreventAppNapIfNeeded() {
-        let shouldHold = isAnyFeatureEnabled
-        if shouldHold {
+        stateLock.lock()
+        let tapRunning = isEventTapActive
+        stateLock.unlock()
+
+        // 仅在 EventTap 实际运行时短暂防止 App Nap，避免全功能开启但空闲时持续占资源
+        if tapRunning {
             if preventAppNapActivity == nil {
                 preventAppNapActivity = ProcessInfo.processInfo.beginActivity(
                     options: .userInitiated,
-                    reason: "Monitor Dock for quick show/hide and popup"
+                    reason: "Keep Dock event tap responsive"
                 )
             }
         } else {
@@ -403,10 +495,23 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
 
 private extension QuickShowHideService {
     func dockItem(at location: CGPoint) -> AXUIElement? {
-        if let item = dockItemAtPosition(location) {
+        if let item = dockItemFromDockList(at: location) {
             return item
         }
-        return dockItemFromDockList(at: location)
+        return dockItemAtPosition(location)
+    }
+
+    func cachedRegularRunningApplications() -> [NSRunningApplication] {
+        if let cache = regularAppsCache,
+           Date().timeIntervalSince(cache.timestamp) < Self.regularAppsCacheTTL {
+            return cache.0
+        }
+
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular
+        }
+        regularAppsCache = (apps, Date())
+        return apps
     }
 
     func dockItemAtPosition(_ location: CGPoint) -> AXUIElement? {
@@ -447,28 +552,82 @@ private extension QuickShowHideService {
         }
 
         let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
-        return findDockItem(in: dockRef, matching: clickPoint)
+        for item in collectAllDockItems(from: dockRef) {
+            guard let rect = dockItemRect(item),
+                  rectContainsClickPoint(rect, clickPoint) else {
+                continue
+            }
+            return item
+        }
+        return nil
     }
 
-    func findDockItem(in element: AXUIElement, matching clickPoint: CGPoint) -> AXUIElement? {
-        if elementRole(element) == "AXDockItem",
-           let rect = dockItemRect(element),
-           rectContainsClickPoint(rect, clickPoint) {
-            return element
+    func ensureDockEntriesCache(force: Bool = false) {
+        if !force,
+           let timestamp = dockEntriesCacheTimestamp,
+           Date().timeIntervalSince(timestamp) < Self.dockEntriesCacheTTL {
+            return
         }
+        rebuildDockEntriesCache()
+    }
 
-        var childrenValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
-              let children = childrenValue as? [AXUIElement] else {
-            return nil
-        }
+    func dockTargetFromEntriesCache(at location: CGPoint) -> DockTarget? {
+        ensureDockEntriesCache()
+        guard let entries = dockEntriesCache else { return nil }
 
-        for child in children {
-            if let found = findDockItem(in: child, matching: clickPoint) {
-                return found
+        for entry in entries {
+            if rectContainsClickPoint(entry.iconRect, location) {
+                return DockTarget(app: entry.app, iconRect: entry.iconRect)
             }
         }
         return nil
+    }
+
+    func rebuildDockEntriesCache() {
+        guard let dockApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
+            dockEntriesCache = []
+            dockEntriesCacheTimestamp = Date()
+            return
+        }
+
+        let dockRef = AXUIElementCreateApplication(dockApp.processIdentifier)
+        let items = collectAllDockItems(from: dockRef)
+        var entries: [CachedDockEntry] = []
+        entries.reserveCapacity(items.count)
+
+        for item in items {
+            guard let rect = dockItemRect(item),
+                  let app = resolveRunningApp(for: item)
+                    ?? resolveRunningAppFromFrontmost(matching: item) else {
+                continue
+            }
+            entries.append(CachedDockEntry(app: app, iconRect: rect))
+        }
+
+        dockEntriesCache = entries
+        dockEntriesCacheTimestamp = Date()
+    }
+
+    func collectAllDockItems(from root: AXUIElement) -> [AXUIElement] {
+        var result: [AXUIElement] = []
+        var stack: [AXUIElement] = [root]
+
+        while let element = stack.popLast() {
+            if elementRole(element) == "AXDockItem" {
+                result.append(element)
+                continue
+            }
+
+            var childrenValue: AnyObject?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+                  let children = childrenValue as? [AXUIElement],
+                  !children.isEmpty else {
+                continue
+            }
+            stack.append(contentsOf: children.reversed())
+        }
+
+        return result
     }
 
     func isAppFrontmostInternal(_ app: NSRunningApplication) -> Bool {
@@ -490,8 +649,7 @@ private extension QuickShowHideService {
                 return finder
             }
 
-            let matches = NSWorkspace.shared.runningApplications.filter {
-                guard $0.activationPolicy == .regular else { return false }
+            let matches = cachedRegularRunningApplications().filter {
                 if let bundleURL = $0.bundleURL, normalizedAppPath(bundleURL) == targetPath {
                     return true
                 }
@@ -512,7 +670,7 @@ private extension QuickShowHideService {
             return app
         }
 
-        let running = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+        let running = cachedRegularRunningApplications()
 
         if let exact = running.first(where: { $0.localizedName == rawTitle }) {
             return exact
@@ -604,9 +762,22 @@ private func isMouseInDockRegion(_ location: CGPoint) -> Bool {
 }
 
 private extension QuickShowHideService {
+    private static var cachedPrimaryScreenHeight: CGFloat?
+    private static var cachedPrimaryScreenHeightTime: Date?
+    private static let primaryScreenHeightCacheTTL: TimeInterval = 2.0
+
     static func primaryScreenHeightValue() -> CGFloat {
+        if let cached = cachedPrimaryScreenHeight,
+           let time = cachedPrimaryScreenHeightTime,
+           Date().timeIntervalSince(time) < primaryScreenHeightCacheTTL {
+            return cached
+        }
+
         let primary = NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main ?? NSScreen.screens.first
-        return primary?.frame.height ?? 0
+        let height = primary?.frame.height ?? 0
+        cachedPrimaryScreenHeight = height
+        cachedPrimaryScreenHeightTime = Date()
+        return height
     }
 }
 

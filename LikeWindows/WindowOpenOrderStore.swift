@@ -12,6 +12,7 @@ enum WindowOpenOrderStore {
     private static var fingerprintsByKey: [String: Set<String>] = [:]
     private static var cgKeyOwners: [String: String] = [:]
     private static let lock = NSLock()
+    private static let maxFingerprintsPerProcess = 50
     private static var didStartObservingTermination = false
 
     static func startObservingAppTermination() {
@@ -33,7 +34,12 @@ enum WindowOpenOrderStore {
         lock.lock()
         defer { lock.unlock() }
 
-        orderedKeys.removeValue(forKey: processIdentifier)
+        if let order = orderedKeys.removeValue(forKey: processIdentifier) {
+            for key in order {
+                fingerprintsByKey.removeValue(forKey: key)
+            }
+        }
+
         let prefix = "\(processIdentifier)|"
         fingerprintKeys = fingerprintKeys.filter { !$0.key.hasPrefix(prefix) }
         cgKeyOwners = cgKeyOwners.filter { !$0.value.hasPrefix(prefix) }
@@ -54,7 +60,7 @@ enum WindowOpenOrderStore {
     static func registerFingerprint(_ orderKey: String, fingerprint: String) {
         lock.lock()
         defer { lock.unlock() }
-        fingerprintsByKey[orderKey, default: []].insert(fingerprint)
+        registerFingerprintLocked(orderKey, fingerprint: fingerprint)
     }
 
     static func orderKey(
@@ -89,6 +95,7 @@ enum WindowOpenOrderStore {
                 let key = "fp:\(UUID().uuidString)"
                 fingerprintKeys[mapKey] = key
                 registerFingerprintLocked(key, fingerprint: fingerprint)
+                evictExcessFingerprintsLocked(for: processIdentifier)
                 return key
             }
 
@@ -101,6 +108,7 @@ enum WindowOpenOrderStore {
         let key = "fp:\(UUID().uuidString)"
         fingerprintKeys[mapKey] = key
         registerFingerprintLocked(key, fingerprint: fingerprint)
+        evictExcessFingerprintsLocked(for: processIdentifier)
         return key
     }
 
@@ -117,6 +125,13 @@ enum WindowOpenOrderStore {
 
         for key in currentKeys where !order.contains(key) {
             order.append(key)
+        }
+
+        let removedKeys = order.filter { !currentKeys.contains($0) }
+        if !removedKeys.isEmpty {
+            for key in removedKeys {
+                fingerprintsByKey.removeValue(forKey: key)
+            }
         }
 
         order = order.filter { currentKeys.contains($0) }
@@ -147,7 +162,28 @@ enum WindowOpenOrderStore {
               let index = order.firstIndex(of: oldKey) else {
             return
         }
+
+        if let fingerprints = fingerprintsByKey.removeValue(forKey: oldKey) {
+            fingerprintsByKey[newKey] = fingerprints
+        }
+
         order[index] = newKey
         orderedKeys[processIdentifier] = order
+    }
+
+    private static func evictExcessFingerprintsLocked(for processIdentifier: pid_t) {
+        let prefix = "\(processIdentifier)|"
+        let mapKeys = fingerprintKeys.keys.filter { $0.hasPrefix(prefix) }
+        guard mapKeys.count > maxFingerprintsPerProcess else { return }
+
+        let removable = mapKeys.filter { fingerprintKeys[$0]?.hasPrefix("fp:") == true }
+        let excess = removable.count - max(0, maxFingerprintsPerProcess - (mapKeys.count - removable.count))
+        guard excess > 0 else { return }
+
+        for mapKey in removable.prefix(excess) {
+            if let orderKey = fingerprintKeys.removeValue(forKey: mapKey) {
+                fingerprintsByKey.removeValue(forKey: orderKey)
+            }
+        }
     }
 }

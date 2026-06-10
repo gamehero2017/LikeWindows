@@ -7,8 +7,7 @@ import AppKit
 import ApplicationServices
 
 enum AppWindowInspector {
-    private static let fullWindowCacheTTL: TimeInterval = 0.15
-    private static let popupWindowCacheTTL: TimeInterval = 0.4
+    private static let popupWindowCacheTTL: TimeInterval = 0.6
     private static let maxCacheEntries = 20
 
     private struct WindowListCache {
@@ -16,7 +15,6 @@ enum AppWindowInspector {
         let timestamp: Date
     }
 
-    private static var fullWindowCache: [pid_t: WindowListCache] = [:]
     private static var popupWindowCache: [pid_t: WindowListCache] = [:]
     private static var cacheAccessOrder: [pid_t] = []
     private static let cacheLock = NSLock()
@@ -25,19 +23,17 @@ enum AppWindowInspector {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         if let processIdentifier {
-            fullWindowCache.removeValue(forKey: processIdentifier)
             popupWindowCache.removeValue(forKey: processIdentifier)
             cacheAccessOrder.removeAll { $0 == processIdentifier }
         } else {
-            fullWindowCache.removeAll()
             popupWindowCache.removeAll()
             cacheAccessOrder.removeAll()
         }
     }
 
-    /// 点击路径判断多窗口，避免 popup 全量 build
+    /// 点击路径判断多窗口，计数到 2 即停止，避免全量枚举
     static func hasMultipleTrackableWindows(for app: NSRunningApplication) -> Bool {
-        trackableAXWindows(for: app).count > 1
+        countTrackableAXWindows(for: app) > 1
     }
 
     private static func windowsInSystemOrder(_ windows: [DockWindowInfo]) -> [DockWindowInfo] {
@@ -66,7 +62,11 @@ enum AppWindowInspector {
         let pid = app.processIdentifier
 
         if useCache, let cached = cachedPopupWindows(for: pid) {
-            return refreshLiveWindowStatesLight(cached, for: app)
+            let refreshed = refreshLiveWindowStatesLight(cached, for: app)
+            if refreshed.map(\.stableOrderKey) != cached.map(\.stableOrderKey) {
+                storePopupCache(pid, windows: refreshed)
+            }
+            return refreshed
         }
 
         let built = buildPopupWindowsLight(for: app)
@@ -83,6 +83,10 @@ enum AppWindowInspector {
     ) -> [DockWindowInfo] {
         let axWindows = trackableAXWindows(for: app)
         guard !axWindows.isEmpty else { return windows }
+
+        if axWindows.count != windows.count {
+            return buildPopupWindowsLight(for: app)
+        }
 
         var axByOrderKey: [String: AXUIElement] = [:]
         var axByFingerprint: [String: AXUIElement] = [:]
@@ -101,7 +105,6 @@ enum AppWindowInspector {
         return windows.map { info in
             let axWindow = axByOrderKey[info.stableOrderKey]
                 ?? knownFingerprintMatch(for: info, in: axByFingerprint)
-                ?? axWindows.first { windowMatches($0, info: info) }
 
             guard let axWindow else { return info }
 
@@ -185,40 +188,12 @@ enum AppWindowInspector {
         return true
     }
 
-    private static func windows(for app: NSRunningApplication, useCache: Bool) -> [DockWindowInfo] {
-        let pid = app.processIdentifier
-        if useCache, let cached = cachedFullWindows(for: pid) {
-            return cached
-        }
-
-        let windows = buildWindows(for: app)
-
-        if useCache {
-            storeFullCache(pid, windows: windows)
-        }
-
-        return windows
-    }
-
     private static func cachedPopupWindows(for pid: pid_t) -> [DockWindowInfo]? {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
         guard let cached = popupWindowCache[pid],
               Date().timeIntervalSince(cached.timestamp) < popupWindowCacheTTL else {
-            return nil
-        }
-
-        touchCacheEntryLocked(pid)
-        return cached.windows
-    }
-
-    private static func cachedFullWindows(for pid: pid_t) -> [DockWindowInfo]? {
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-
-        guard let cached = fullWindowCache[pid],
-              Date().timeIntervalSince(cached.timestamp) < fullWindowCacheTTL else {
             return nil
         }
 
@@ -235,15 +210,6 @@ enum AppWindowInspector {
         evictCacheIfNeededLocked()
     }
 
-    private static func storeFullCache(_ pid: pid_t, windows: [DockWindowInfo]) {
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-
-        fullWindowCache[pid] = WindowListCache(windows: windows, timestamp: Date())
-        touchCacheEntryLocked(pid)
-        evictCacheIfNeededLocked()
-    }
-
     private static func touchCacheEntryLocked(_ pid: pid_t) {
         cacheAccessOrder.removeAll { $0 == pid }
         cacheAccessOrder.append(pid)
@@ -252,7 +218,6 @@ enum AppWindowInspector {
     private static func evictCacheIfNeededLocked() {
         while cacheAccessOrder.count > maxCacheEntries {
             let evicted = cacheAccessOrder.removeFirst()
-            fullWindowCache.removeValue(forKey: evicted)
             popupWindowCache.removeValue(forKey: evicted)
         }
     }
@@ -302,51 +267,6 @@ enum AppWindowInspector {
             return raw
         }
         return "默认"
-    }
-
-    private static func buildWindows(for app: NSRunningApplication) -> [DockWindowInfo] {
-        let axWindows = trackableAXWindows(for: app)
-        let cgWindows = cgWindowEntries(for: app)
-
-        var usedCGNumbers = Set<Int>()
-        var seenOrderKeys = Set<String>()
-
-        let raw = axWindows.compactMap { window -> DockWindowInfo? in
-            let cgMatch = matchCGWindow(for: window, in: cgWindows, excluding: usedCGNumbers)
-            if let number = cgMatch?.number {
-                usedCGNumbers.insert(number)
-            }
-
-            let title = displayTitle(for: window, cgMatch: cgMatch)
-            let fingerprint = axWindowFingerprint(window)
-            let orderKey = WindowOpenOrderStore.orderKey(
-                processIdentifier: app.processIdentifier,
-                cgWindowNumber: cgMatch?.number,
-                fingerprint: fingerprint
-            )
-            WindowOpenOrderStore.registerFingerprint(orderKey, fingerprint: fingerprint)
-
-            guard seenOrderKeys.insert(orderKey).inserted else {
-                return nil
-            }
-
-            return DockWindowInfo(
-                stableOrderKey: orderKey,
-                title: title,
-                isMinimized: isMinimized(window),
-                processIdentifier: app.processIdentifier,
-                windowIndex: 0,
-                canClose: hasEnabledButton(window, kAXCloseButtonAttribute as CFString),
-                canMinimize: hasEnabledButton(window, kAXMinimizeButtonAttribute as CFString),
-                canZoom: hasEnabledButton(window, kAXZoomButtonAttribute as CFString),
-                cgWindowNumber: cgMatch?.number
-            )
-        }
-
-        if UserDefaults.standard.bool(forKey: useSystemWindowOrderKey) {
-            return windowsInSystemOrder(raw)
-        }
-        return WindowOpenOrderStore.sortedWindows(raw, for: app.processIdentifier)
     }
 
     /// 激活并打开 popup 中选中的窗口（须在主线程调用）
@@ -655,6 +575,26 @@ enum AppWindowInspector {
         }
     }
 
+    private static func countTrackableAXWindows(for app: NSRunningApplication) -> Int {
+        let appRef = AXUIElementCreateApplication(app.processIdentifier)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else {
+            return 0
+        }
+
+        var count = 0
+        for window in axWindows {
+            if isTrackableWindow(window) {
+                count += 1
+                if count > 1 {
+                    return count
+                }
+            }
+        }
+        return count
+    }
+
     private static func trackableAXWindows(for app: NSRunningApplication) -> [AXUIElement] {
         let appRef = AXUIElementCreateApplication(app.processIdentifier)
         var windowsRef: CFTypeRef?
@@ -712,51 +652,6 @@ enum AppWindowInspector {
             let title = entry[kCGWindowName as String] as? String ?? ""
             return CGWindowEntry(number: number, title: title, bounds: bounds)
         }
-    }
-
-    private static func matchCGWindow(
-        for axWindow: AXUIElement,
-        in entries: [CGWindowEntry],
-        excluding usedNumbers: Set<Int> = []
-    ) -> CGWindowEntry? {
-        if let frame = axWindowFrame(axWindow),
-           let match = entries.first(where: { entry in
-               !usedNumbers.contains(entry.number) && framesMatch(frame, entry.bounds)
-           }) {
-            return match
-        }
-
-        if isMinimized(axWindow) {
-            let title = axTitle(axWindow)
-            let titleMatches = entries.filter { entry in
-                !usedNumbers.contains(entry.number)
-                    && !entry.title.isEmpty
-                    && entry.title == title
-            }
-            if titleMatches.count == 1 {
-                return titleMatches[0]
-            }
-        }
-
-        return nil
-    }
-
-    private static func displayTitle(
-        for axWindow: AXUIElement,
-        cgMatch: CGWindowEntry?
-    ) -> String {
-        var titleRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef) == .success,
-           let raw = titleRef as? String,
-           !raw.isEmpty {
-            return raw
-        }
-
-        if let cgMatch, !cgMatch.title.isEmpty {
-            return cgMatch.title
-        }
-
-        return "默认"
     }
 
     private static func axWindowFrame(_ window: AXUIElement) -> CGRect? {

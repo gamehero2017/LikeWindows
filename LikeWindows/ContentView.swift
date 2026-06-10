@@ -23,22 +23,24 @@ struct ContentView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 14) {
                 header
-                statusCard
-                settingsGroup
+                statusBanner
+
+                if (quickShowHideEnabled || dockInfoPopupEnabled) && !accessibilityGranted {
+                    permissionSection
+                }
+
+                settingsSection
 
                 if quickShowHideEnabled || dockInfoPopupEnabled {
-                    usageCard
-
-                    if !accessibilityGranted {
-                        permissionCard
-                    }
+                    usageSection
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
         }
-        .frame(minWidth: 480, minHeight: 340)
+        .frame(minWidth: 440, minHeight: 300)
         .background(Color(nsColor: .windowBackgroundColor))
         .background(WindowTitleSetter(title: windowTitle))
         .onAppear {
@@ -52,13 +54,17 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("偏好设置")
-                    .font(.system(size: 24, weight: .bold))
+        VStack(alignment: .leading, spacing: 3) {
+            Text("偏好设置")
+                .font(.system(size: 20, weight: .bold))
+
+            HStack(spacing: 5) {
+                Text("让 Dock 操作更接近 Windows 任务栏")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Image(systemName: "info.circle")
-                    .font(.system(size: 17, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .symbolRenderingMode(.hierarchical)
                     .contentShape(Rectangle())
@@ -71,147 +77,163 @@ struct ContentView: View {
                     .help("关于如窗")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityLabel("关于如窗")
-
-                Spacer(minLength: 0)
             }
-
-            Text("像Windows一样的操作偏好，让Dock操作更接近Windows任务栏")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var settingsGroup: some View {
+    private var statusBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: accessibilityGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(accessibilityGranted ? .green : .orange)
+
+            Text(diagnosticText)
+                .font(.caption.monospaced())
+                .foregroundStyle(accessibilityGranted ? Color.secondary : Color.orange)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(cardBackground)
+    }
+
+    private var settingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "操作")
+
+            VStack(spacing: 0) {
+                SettingToggleRow(
+                    title: "快速显示/隐藏",
+                    subtitle: "单窗口：点击 Dock 图标隐藏，再次点击恢复",
+                    systemImage: "arrow.up.arrow.down.circle.fill",
+                    tint: .blue,
+                    style: .primary,
+                    isOn: $quickShowHideEnabled
+                ) { _ in
+                    handleToggleChange()
+                }
+
+                sectionDivider
+
+                dockPopupGroup
+
+                sectionDivider
+
+                SettingToggleRow(
+                    title: "登录时打开",
+                    subtitle: launchAtLoginSubtitle,
+                    systemImage: "power.circle.fill",
+                    tint: .orange,
+                    style: .primary,
+                    isOn: $launchAtLoginEnabled
+                ) { enabled in
+                    handleLaunchAtLoginChange(enabled)
+                }
+            }
+            .background(cardBackground)
+        }
+    }
+
+    private var dockPopupGroup: some View {
         VStack(spacing: 0) {
             SettingToggleRow(
-                title: "快速显示/隐藏",
-                subtitle: "单窗口应用：点击 Dock 图标，窗口最小化，再次点击恢复窗口显示",
-                systemImage: "arrow.up.arrow.down.circle.fill",
-                tint: .blue,
-                isOn: $quickShowHideEnabled
-            ) { _ in
-                handleToggleChange()
-            }
-
-            Divider()
-                .padding(.leading, 52)
-
-            SettingToggleRow(
                 title: "Dock 信息弹窗",
-                subtitle: "多窗口应用：悬停 Dock 图标显示全部窗口信息",
+                subtitle: "多窗口：悬停 Dock 图标显示全部窗口",
                 systemImage: "macwindow.on.rectangle",
                 tint: .purple,
+                style: .primary,
                 isOn: $dockInfoPopupEnabled
             ) { _ in
                 handleToggleChange()
             }
 
             if dockInfoPopupEnabled {
-                Divider()
-                    .padding(.leading, 52)
-
-                SettingToggleRow(
-                    title: "系统窗口排序",
-                    subtitle: "开启后 popup 列表跟随系统当前窗口顺序；关闭则按打开顺序固定排列",
-                    systemImage: "arrow.up.arrow.down.square.fill",
-                    tint: .teal,
-                    isOn: $useSystemWindowOrder
-                ) { _ in
-                    DockInfoPopupService.shared.refreshCurrentPopup()
+                NestedSettingsGroup(tint: .purple) {
+                    SettingToggleRow(
+                        title: "系统窗口排序",
+                        subtitle: "跟随系统顺序；关闭则按打开顺序固定排列",
+                        systemImage: "arrow.up.arrow.down.square.fill",
+                        tint: .teal,
+                        style: .nested,
+                        isOn: $useSystemWindowOrder
+                    ) { _ in
+                        DockInfoPopupService.shared.refreshCurrentPopup()
+                    }
                 }
-            }
-
-            Divider()
-                .padding(.leading, 52)
-
-            SettingToggleRow(
-                title: "登录时打开",
-                subtitle: launchAtLoginSubtitle,
-                systemImage: "power.circle.fill",
-                tint: .orange,
-                isOn: $launchAtLoginEnabled
-            ) { enabled in
-                handleLaunchAtLoginChange(enabled)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .animation(.easeInOut(duration: 0.18), value: dockInfoPopupEnabled)
+    }
+
+    private var usageSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "使用说明")
+
+            VStack(alignment: .leading, spacing: 6) {
+                if quickShowHideEnabled {
+                    UsageLine(label: "单窗口", detail: "点击 Dock 图标切换显示/隐藏")
+                }
+                if dockInfoPopupEnabled {
+                    UsageLine(label: "多窗口", detail: "悬停 Dock 图标查看窗口，移开即关闭")
+                    UsageLine(
+                        label: "排序",
+                        detail: useSystemWindowOrder
+                            ? "跟随系统当前窗口顺序"
+                            : "按打开顺序固定排列"
+                    )
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(cardBackground)
+        }
+    }
+
+    private var permissionSection: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "hand.raised.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.orange)
+
+            Text("需要辅助功能权限，授权后功能方可生效。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 8)
+
+            Button("去授权") {
+                QuickShowHideService.shared.openAccessibilitySettings()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(cardBackground)
+    }
+
+    private var sectionDivider: some View {
+        Divider().padding(.leading, 48)
     }
 
     private var launchAtLoginSubtitle: String {
         if launchAtLoginPendingApproval {
-            return "已请求加入登录项，请在系统设置中允许如窗登录时打开"
+            return "请在系统设置中允许如窗登录时打开"
         }
-        return "登录 Mac 时自动启动如窗"
-    }
-
-    private var usageCard: some View {
-        InfoCard(
-            title: "使用说明",
-            systemImage: "info.circle.fill",
-            tint: .secondary
-        ) {
-            VStack(alignment: .leading, spacing: 8) {
-                UsageLine(
-                    label: "单窗口",
-                    detail: "前台点击隐藏，再次点击恢复窗口显示"
-                )
-                UsageLine(
-                    label: "多窗口",
-                    detail: "悬停显示全部窗口信息，鼠标离开弹窗消失"
-                )
-                UsageLine(
-                    label: "窗口排序",
-                    detail: useSystemWindowOrder
-                        ? "已开启：popup 列表使用系统当前窗口顺序"
-                        : "已关闭：popup 列表按窗口打开顺序固定排列，不随焦点变化"
-                )
-            }
-        }
-    }
-
-    private var statusCard: some View {
-        InfoCard(
-            title: "运行状态",
-            systemImage: accessibilityGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
-            tint: accessibilityGranted ? .green : .orange
-        ) {
-            Text(diagnosticText)
-                .font(.caption.monospaced())
-                .foregroundStyle(accessibilityGranted ? Color.secondary : Color.orange)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var permissionCard: some View {
-        InfoCard(
-            title: "需要辅助功能权限",
-            systemImage: "hand.raised.fill",
-            tint: .orange
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("请在系统设置中为如窗开启辅助功能权限，授权后功能即可生效。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button {
-                    QuickShowHideService.shared.openAccessibilitySettings()
-                } label: {
-                    Label("打开辅助功能设置", systemImage: "gearshape")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-            }
-        }
+        return "登录 Mac 时自动启动"
     }
 
     private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
             .fill(Color(nsColor: .controlBackgroundColor))
             .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
             }
     }
 
@@ -247,32 +269,52 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Components
+
+private struct SectionHeader: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+            .padding(.leading, 2)
+    }
+}
+
+private enum SettingRowStyle {
+    case primary
+    case nested
+}
+
 private struct SettingToggleRow: View {
     let title: String
     let subtitle: String
     let systemImage: String
     let tint: Color
+    let style: SettingRowStyle
     @Binding var isOn: Bool
     let onChange: (Bool) -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .center, spacing: style == .primary ? 10 : 8) {
             Image(systemName: systemImage)
-                .font(.system(size: 20, weight: .medium))
+                .font(.system(size: style == .primary ? 17 : 14, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 28, height: 28)
+                .frame(width: style == .primary ? 24 : 20, height: style == .primary ? 24 : 20)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.body.weight(.semibold))
+                    .font(style == .primary ? .subheadline.weight(.semibold) : .caption.weight(.semibold))
 
                 Text(subtitle)
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer(minLength: 12)
+            Spacer(minLength: 8)
 
             Toggle(
                 "",
@@ -286,35 +328,37 @@ private struct SettingToggleRow: View {
             )
             .labelsHidden()
             .toggleStyle(.switch)
+            .controlSize(.mini)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.horizontal, style == .primary ? 12 : 10)
+        .padding(.vertical, style == .primary ? 10 : 8)
     }
 }
 
-private struct InfoCard<Content: View>: View {
-    let title: String
-    let systemImage: String
+private struct NestedSettingsGroup<Content: View>: View {
     let tint: Color
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: systemImage)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tint)
+        HStack(alignment: .top, spacing: 0) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(tint.opacity(0.35))
+                .frame(width: 2)
+                .padding(.leading, 22)
+                .padding(.vertical, 4)
 
-            content
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-                }
+            VStack(spacing: 0) {
+                content
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 4)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(tint.opacity(0.06))
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 8)
+            .padding(.bottom, 8)
         }
     }
 }
@@ -324,14 +368,14 @@ private struct UsageLine: View {
     let detail: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 6) {
             Text(label)
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: 40, alignment: .leading)
 
             Text(detail)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -349,18 +393,18 @@ private struct AboutPopoverView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
                 if let icon = NSApp.applicationIconImage {
                     Image(nsImage: icon)
                         .resizable()
                         .interpolation(.high)
-                        .frame(width: 48, height: 48)
+                        .frame(width: 44, height: 44)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(appName)
-                        .font(.title3.weight(.semibold))
+                        .font(.headline)
 
                     Text("版本 \(versionText)")
                         .font(.caption)
@@ -370,19 +414,17 @@ private struct AboutPopoverView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Label("开发者", systemImage: "person.crop.circle")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(.caption.weight(.semibold))
 
                 Text(developerName)
-                    .font(.body)
+                    .font(.subheadline)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Label("软件说明", systemImage: "doc.text")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(.caption.weight(.semibold))
 
                 Text(
                     "如窗是一款 macOS 效率工具，让 Dock 的操作体验更接近 Windows 任务栏。"
@@ -394,8 +436,8 @@ private struct AboutPopoverView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(20)
-        .frame(width: 320)
+        .padding(18)
+        .frame(width: 300)
     }
 }
 
