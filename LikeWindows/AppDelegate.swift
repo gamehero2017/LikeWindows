@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .likeWindowsShowPreferences,
             object: bundleID
         )
-        existing.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+        existing.activate(options: [.activateAllWindows])
         NSApp.terminate(nil)
     }
 

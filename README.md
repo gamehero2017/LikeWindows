@@ -6,7 +6,9 @@
 
 ### 偏好设置
 
-![偏好设置界面](docs/images/preferences.png)
+<p align="center">
+  <img src="docs/images/preferences.png" width="420" alt="偏好设置界面">
+</p>
 
 集中管理各项功能开关：快速显示/隐藏、Dock 信息弹窗、系统窗口排序与登录时自动启动。顶部状态栏实时显示辅助功能授权与后台监听状态。
 
@@ -16,11 +18,15 @@
 
 **多窗口浏览器（Google Chrome）** — 列出前台与已最小化窗口，可直接切换或操作：
 
-![Dock 信息弹窗 - Google Chrome](docs/images/dock-popup-chrome.png)
+<p align="center">
+  <img src="docs/images/dock-popup-chrome.png" width="560" alt="Dock 信息弹窗 - Google Chrome">
+</p>
 
 **多窗口访达（Finder）** — 展示多个 Finder 窗口，悬停高亮当前条目，点击即可切换：
 
-![Dock 信息弹窗 - 访达](docs/images/dock-popup-finder.png)
+<p align="center">
+  <img src="docs/images/dock-popup-finder.png" width="420" alt="Dock 信息弹窗 - 访达">
+</p>
 
 ## 功能
 
