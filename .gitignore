@@ -26,6 +26,9 @@ build/export/
 build/dmg-staging/
 *.dmg
 
+# Local icon exports (source copies live under LikeWindows/)
+resources/
+
 # Secrets (never commit)
 .env
 *.p12
