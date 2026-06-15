@@ -170,6 +170,10 @@ struct ContentView: View {
             SectionHeader(title: "使用说明")
 
             VStack(alignment: .leading, spacing: 6) {
+                UsageLine(
+                    label: "后台运行",
+                    detail: "关闭本窗口后如窗继续在后台运行并隐藏 Dock 图标；再次从启动台或应用程序打开即可"
+                )
                 if quickShowHideEnabled {
                     UsageLine(label: "单窗口", detail: "点击 Dock 图标切换显示/隐藏")
                 }

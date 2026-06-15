@@ -32,7 +32,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
             } else {
                 window.orderFrontRegardless()
             }
-            NSApp.activate()
+            showInDock()
             return
         }
 
@@ -48,6 +48,19 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         self.window = window
 
         window.makeKeyAndOrderFront(nil)
+        showInDock()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        hideFromDock()
+    }
+
+    private func showInDock() {
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+    }
+
+    private func hideFromDock() {
+        NSApp.setActivationPolicy(.accessory)
     }
 }
