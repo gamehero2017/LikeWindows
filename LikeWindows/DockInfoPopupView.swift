@@ -139,7 +139,7 @@ struct DockInfoPopupView: View {
                     index: index + 1,
                     contentWidth: layout.width,
                     layout: layout,
-                    rowHeight: layout.rowHeights[index]
+                    rowHeight: layout.rowHeight(at: index)
                 )
             }
         }

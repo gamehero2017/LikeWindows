@@ -10,16 +10,14 @@ import Combine
 import SwiftUI
 
 struct ContentView: View {
-    @AppStorage("quickShowHideEnabled") private var quickShowHideEnabled = false
-    @AppStorage("dockInfoPopupEnabled") private var dockInfoPopupEnabled = false
-    @AppStorage(useSystemWindowOrderKey) private var useSystemWindowOrder = false
+    @AppStorage(AppSettings.quickShowHideEnabled) private var quickShowHideEnabled = false
+    @AppStorage(AppSettings.dockInfoPopupEnabled) private var dockInfoPopupEnabled = false
+    @AppStorage(AppSettings.useSystemWindowOrder) private var useSystemWindowOrder = false
     @State private var accessibilityGranted = QuickShowHideService.shared.isAccessibilityGranted
     @State private var diagnosticText = QuickShowHideService.shared.diagnosticSummary
     @State private var showsAboutPopover = false
     @State private var launchAtLoginEnabled = LaunchAtLoginService.isEnabled
     @State private var launchAtLoginPendingApproval = LaunchAtLoginService.needsApproval
-
-    private let windowTitle = "如窗"
 
     var body: some View {
         ScrollView {
@@ -42,7 +40,6 @@ struct ContentView: View {
         }
         .frame(minWidth: 440, minHeight: 300)
         .background(Color(nsColor: .windowBackgroundColor))
-        .background(WindowTitleSetter(title: windowTitle))
         .onAppear {
             QuickShowHideService.shared.refreshAccessibilityStatus()
             refreshLaunchAtLoginState()
@@ -438,24 +435,6 @@ private struct AboutPopoverView: View {
         }
         .padding(18)
         .frame(width: 300)
-    }
-}
-
-private struct WindowTitleSetter: NSViewRepresentable {
-    let title: String
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        DispatchQueue.main.async {
-            view.window?.title = title
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            nsView.window?.title = title
-        }
     }
 }
 

@@ -15,6 +15,7 @@ struct DockTarget: Equatable {
 
     static func == (lhs: DockTarget, rhs: DockTarget) -> Bool {
         lhs.app.processIdentifier == rhs.app.processIdentifier
+            && lhs.iconRect == rhs.iconRect
     }
 }
 

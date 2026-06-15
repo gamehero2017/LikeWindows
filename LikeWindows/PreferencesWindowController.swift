@@ -6,7 +6,6 @@
 import AppKit
 import SwiftUI
 
-@MainActor
 final class PreferencesWindowController: NSObject, NSWindowDelegate {
     static let shared = PreferencesWindowController()
 
@@ -20,6 +19,13 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     }
 
     func showWindow() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [self] in
+                showWindow()
+            }
+            return
+        }
+
         if let window {
             if !window.isVisible {
                 window.makeKeyAndOrderFront(nil)
@@ -27,7 +33,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
                 window.orderFrontRegardless()
             }
             NSApp.activate()
-            showInDock()
             return
         }
 
@@ -44,19 +49,5 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
-        showInDock()
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        hideFromDock()
-    }
-
-    private func showInDock() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
-    }
-
-    private func hideFromDock() {
-        NSApp.setActivationPolicy(.accessory)
     }
 }

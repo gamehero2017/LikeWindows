@@ -40,6 +40,13 @@ struct DockPopupLayout {
         density == .compact ? 26 : 30
     }
 
+    func rowHeight(at index: Int) -> CGFloat {
+        guard index >= 0, index < rowHeights.count else {
+            return density == .compact ? 40 : 44
+        }
+        return rowHeights[index]
+    }
+
     static func calculate(
         appName: String,
         windows: [DockWindowInfo],

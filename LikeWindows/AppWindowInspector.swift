@@ -110,7 +110,7 @@ enum AppWindowInspector {
 
             return DockWindowInfo(
                 stableOrderKey: info.stableOrderKey,
-                title: info.title,
+                title: displayTitleLight(for: axWindow),
                 isMinimized: isMinimized(axWindow),
                 processIdentifier: info.processIdentifier,
                 windowIndex: info.windowIndex,
@@ -178,14 +178,13 @@ enum AppWindowInspector {
         }
         guard !visible.isEmpty else { return false }
 
-        if animatedMinimize(visible[0]) {
-            return true
+        var didMinimizeAny = false
+        for window in visible {
+            if animatedMinimize(window) {
+                didMinimizeAny = true
+            }
         }
-
-        for window in visible.dropFirst() {
-            animatedMinimize(window)
-        }
-        return true
+        return didMinimizeAny
     }
 
     private static func cachedPopupWindows(for pid: pid_t) -> [DockWindowInfo]? {
@@ -253,7 +252,7 @@ enum AppWindowInspector {
             )
         }
 
-        if UserDefaults.standard.bool(forKey: useSystemWindowOrderKey) {
+        if UserDefaults.standard.bool(forKey: AppSettings.useSystemWindowOrder) {
             return windowsInSystemOrder(raw)
         }
         return WindowOpenOrderStore.sortedWindows(raw, for: app.processIdentifier)

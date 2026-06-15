@@ -6,7 +6,6 @@
 import AppKit
 import ApplicationServices
 
-private let quickShowHideEnabledKey = "quickShowHideEnabled"
 private let clickDebounceInterval: TimeInterval = 0.15
 private let finderBundleIdentifier = "com.apple.finder"
 
@@ -114,10 +113,14 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
     }
 
     func stop() {
-        DispatchQueue.main.async { [weak self] in
-            self?.enterDeepSleep()
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.stop()
+            }
+            return
         }
         isStarted = false
+        enterDeepSleep()
     }
 
     @objc private func userDefaultsDidChange() {
@@ -287,15 +290,15 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
     }
 
     var isAnyFeatureEnabled: Bool {
-        UserDefaults.standard.bool(forKey: quickShowHideEnabledKey)
-            || UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey)
+        UserDefaults.standard.bool(forKey: AppSettings.quickShowHideEnabled)
+            || UserDefaults.standard.bool(forKey: AppSettings.dockInfoPopupEnabled)
     }
 
     var diagnosticSummary: String {
         let trusted = AXIsProcessTrusted()
         let working = trusted && AccessibilityHealth.isWorking()
-        let quickEnabled = UserDefaults.standard.bool(forKey: quickShowHideEnabledKey)
-        let popupEnabled = UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey)
+        let quickEnabled = UserDefaults.standard.bool(forKey: AppSettings.quickShowHideEnabled)
+        let popupEnabled = UserDefaults.standard.bool(forKey: AppSettings.dockInfoPopupEnabled)
         stateLock.lock()
         let tap = isEventTapActive
         stateLock.unlock()
@@ -439,8 +442,8 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         invalidateDockTargetCache()
         guard let target = dockTarget(at: location) else { return false }
 
-        let popupEnabled = UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey)
-        let quickEnabled = UserDefaults.standard.bool(forKey: quickShowHideEnabledKey)
+        let popupEnabled = UserDefaults.standard.bool(forKey: AppSettings.dockInfoPopupEnabled)
+        let quickEnabled = UserDefaults.standard.bool(forKey: AppSettings.quickShowHideEnabled)
 
         return DockClickRouter.handleClick(
             on: target,

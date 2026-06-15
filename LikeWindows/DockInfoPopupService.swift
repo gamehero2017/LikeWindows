@@ -6,9 +6,6 @@
 import AppKit
 import SwiftUI
 
-let dockInfoPopupEnabledKey = "dockInfoPopupEnabled"
-let useSystemWindowOrderKey = "useSystemWindowOrderEnabled"
-
 final class DockInfoPopupService: NSObject {
     static let shared = DockInfoPopupService()
 
@@ -27,7 +24,8 @@ final class DockInfoPopupService: NSObject {
     private var hostingView: NSHostingView<DockInfoPopupView>?
     private var popupModel: DockInfoPopupModel?
     private var fallbackTimer: Timer?
-    private var mouseMonitor: Any?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
     private var monitoringPhase: MonitoringPhase = .idle
     private var currentTargetPID: pid_t?
     private var currentIconRect: CGRect?
@@ -38,6 +36,8 @@ final class DockInfoPopupService: NSObject {
     private var isMouseNearDock = false
     private var lastPopupRefreshTime: TimeInterval = 0
     private var lastWindowStateSignature: String?
+    private var lastFrontmostState: Bool?
+    private var lastPopupAnchor: CGRect?
     private var pendingPresentTarget: DockTarget?
     private var isPresentQueued = false
     private var lastHoverProcessTime: CFTimeInterval = 0
@@ -143,27 +143,40 @@ final class DockInfoPopupService: NSObject {
     }
 
     private func ensureMouseMonitor() {
-        guard mouseMonitor == nil else { return }
+        if globalMouseMonitor == nil {
+            globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
+            ) { [weak self] _ in
+                self?.handleMouseMoved()
+            }
+        }
 
-        mouseMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
-        ) { [weak self] _ in
-            // 监听器在主线程注册，回调也在主线程；避免 async 排队抢占弹窗内 onHover
-            self?.handleGlobalMouseMoved()
+        if localMouseMonitor == nil {
+            localMouseMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
+            ) { [weak self] event in
+                self?.handleMouseMoved()
+                return event
+            }
         }
     }
 
     private func removeMouseMonitor() {
-        if let mouseMonitor {
-            NSEvent.removeMonitor(mouseMonitor)
-            self.mouseMonitor = nil
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+            self.globalMouseMonitor = nil
+        }
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+            self.localMouseMonitor = nil
         }
     }
 
-    private func handleGlobalMouseMoved() {
+    private func handleMouseMoved() {
         let mouse = NSEvent.mouseLocation
 
         if isPopupPresented, isMouseOverPanel(mouse) {
+            refreshCurrentPopupOnMain(force: false)
             return
         }
 
@@ -270,12 +283,13 @@ final class DockInfoPopupService: NSObject {
         )
 
         lastWindowStateSignature = Self.windowsStateSignature(snapshot.windows)
+        lastFrontmostState = QuickShowHideService.shared.isAppFrontmost(target.app)
         lastPopupRefreshTime = Date().timeIntervalSince1970
 
         applyPopupContent(
             appName: appName,
             appIcon: target.app.icon,
-            isFrontmost: QuickShowHideService.shared.isAppFrontmost(target.app),
+            isFrontmost: lastFrontmostState ?? false,
             windows: snapshot.windows,
             layout: layout,
             anchor: target.iconRect
@@ -293,14 +307,18 @@ final class DockInfoPopupService: NSObject {
         let panel = ensurePanel()
         guard let model = popupModel else { return }
 
+        let layoutChanged = layoutNeedsUpdate(current: model.layout, new: layout)
+        let shouldMovePanel = layoutChanged || anchorNeedsFrameUpdate(anchor)
+
         model.appName = appName
         model.appIcon = appIcon
         model.isFrontmost = isFrontmost
+        model.layout = layout
         model.windows = windows
 
-        if layoutNeedsUpdate(current: model.layout, new: layout) {
-            model.layout = layout
+        if shouldMovePanel {
             panel.setFrame(layout.frame(anchor: anchor), display: false)
+            lastPopupAnchor = anchor
         }
 
         panel.hasShadow = false
@@ -316,7 +334,16 @@ final class DockInfoPopupService: NSObject {
             || current.totalHeight != new.totalHeight
             || current.needsScroll != new.needsScroll
             || current.density != new.density
+            || current.rowHeights.count != new.rowHeights.count
             || current.rowHeights != new.rowHeights
+    }
+
+    private func anchorNeedsFrameUpdate(_ anchor: CGRect) -> Bool {
+        guard let lastPopupAnchor else { return true }
+        let tolerance: CGFloat = 0.5
+        return abs(lastPopupAnchor.midX - anchor.midX) > tolerance
+            || abs(lastPopupAnchor.minY - anchor.minY) > tolerance
+            || abs(lastPopupAnchor.width - anchor.width) > tolerance
     }
 
     func refreshCurrentPopup() {
@@ -348,13 +375,17 @@ final class DockInfoPopupService: NSObject {
             return
         }
 
+        let isFrontmost = QuickShowHideService.shared.isAppFrontmost(app)
         let signature = Self.windowsStateSignature(snapshot.windows)
-        if !force, signature == lastWindowStateSignature {
+        if !force,
+           signature == lastWindowStateSignature,
+           isFrontmost == lastFrontmostState {
             return
         }
 
         lastPopupRefreshTime = now
         lastWindowStateSignature = signature
+        lastFrontmostState = isFrontmost
 
         let appName = app.localizedName ?? "未知应用"
         let layout = DockPopupLayout.calculate(
@@ -366,7 +397,7 @@ final class DockInfoPopupService: NSObject {
         applyPopupContent(
             appName: appName,
             appIcon: app.icon,
-            isFrontmost: QuickShowHideService.shared.isAppFrontmost(app),
+            isFrontmost: isFrontmost,
             windows: snapshot.windows,
             layout: layout,
             anchor: iconRect
@@ -394,6 +425,8 @@ final class DockInfoPopupService: NSObject {
         currentIconRect = nil
         cachedHoverTarget = nil
         lastWindowStateSignature = nil
+        lastFrontmostState = nil
+        lastPopupAnchor = nil
         lastPopupRefreshTime = 0
     }
 
@@ -424,6 +457,7 @@ final class DockInfoPopupService: NSObject {
         guard isMonitoringEnabled else { return }
 
         if isPopupPresented, isMouseOverPanel(mouse) {
+            refreshCurrentPopupOnMain(force: false)
             return
         }
 

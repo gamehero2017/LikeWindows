@@ -58,7 +58,17 @@ enum AccessibilityHealth {
         }
 
         let systemWide = AXUIElementCreateSystemWide()
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let probePoint = screen.map { NSPoint(x: $0.frame.midX, y: $0.frame.midY) } ?? NSPoint(x: 100, y: 100)
+        let screenHeight = screen?.frame.height ?? probePoint.y * 2
+        let cgPoint = CGPoint(x: probePoint.x, y: screenHeight - probePoint.y)
+
         var probe: AXUIElement?
-        return AXUIElementCopyElementAtPosition(systemWide, 0, 0, &probe) == .success
+        return AXUIElementCopyElementAtPosition(
+            systemWide,
+            Float(cgPoint.x),
+            Float(cgPoint.y),
+            &probe
+        ) == .success
     }
 }

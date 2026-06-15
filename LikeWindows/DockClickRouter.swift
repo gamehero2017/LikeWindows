@@ -27,7 +27,7 @@ enum DockClickRouter {
     private static func handleSingleWindowHide(_ target: DockTarget) -> Bool {
         guard QuickShowHideService.shared.isAppFrontmost(target.app) else { return false }
         guard AppWindowInspector.hasVisibleWindowFast(for: target.app) else { return false }
-        guard QuickShowHideService.shared.shouldProcessClick(for: target.app) else { return true }
+        guard QuickShowHideService.shared.shouldProcessClick(for: target.app) else { return false }
 
         return AppWindowInspector.hideActiveWindowIfVisible(for: target.app)
     }
@@ -35,7 +35,7 @@ enum DockClickRouter {
     private static func handleMultiWindowHide(_ target: DockTarget) -> Bool {
         guard QuickShowHideService.shared.isAppFrontmost(target.app) else { return false }
         guard AppWindowInspector.hasVisibleWindowFast(for: target.app) else { return false }
-        guard QuickShowHideService.shared.shouldProcessClick(for: target.app) else { return true }
+        guard QuickShowHideService.shared.shouldProcessClick(for: target.app) else { return false }
 
         return AppWindowInspector.minimizeAllVisibleWindows(for: target.app)
     }

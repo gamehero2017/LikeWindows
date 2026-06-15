@@ -1,8 +1,6 @@
 //
-//  likeWindowsApp.swift
-//  likeWindows
-//
-//  Created by 青藤 on 2026/6/9.
+//  LikeWindowsApp.swift
+//  LikeWindows
 //
 
 import SwiftUI
@@ -12,7 +10,7 @@ struct LikeWindowsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        Settings {
             EmptyView()
         }
         .defaultLaunchBehavior(.suppressed)
