@@ -81,7 +81,7 @@ chmod +x scripts/build-dmg.sh   # 首次使用时赋予执行权限
 2. 将 `.app` 与「应用程序」快捷方式放入 `build/dmg-staging/`
 3. 用 `hdiutil` 生成 DMG 到 `build/export/LikeWindows-<版本号>.dmg`
 
-例如当前版本会输出：`build/export/LikeWindows-1.0.dmg`
+例如当前版本会输出：`build/export/LikeWindows-1.2(1).dmg`
 
 ### 手动步骤（可选）
 
@@ -112,6 +112,9 @@ hdiutil create -volname "如窗" -srcfolder build/dmg-staging \
 | 单窗口应用 | 前台点击 Dock 图标隐藏窗口，再次点击恢复    |
 | 多窗口应用 | 悬停 Dock 图标查看全部窗口，移开鼠标后弹窗消失 |
 
+## 更新日志
+
+- [1.2(1) 更新说明](docs/更新日志-1.2.md)
 
 ## 技术栈
 

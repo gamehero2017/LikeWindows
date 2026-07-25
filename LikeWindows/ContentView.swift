@@ -9,10 +9,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// 偏好设置主界面：功能开关、辅助功能状态、使用说明与关于信息。
 struct ContentView: View {
     @AppStorage(AppSettings.quickShowHideEnabled) private var quickShowHideEnabled = false
     @AppStorage(AppSettings.dockInfoPopupEnabled) private var dockInfoPopupEnabled = false
     @AppStorage(AppSettings.useSystemWindowOrder) private var useSystemWindowOrder = false
+    @AppStorage(AppSettings.menuBarIconVisible) private var menuBarIconVisible = true
     @State private var accessibilityGranted = QuickShowHideService.shared.isAccessibilityGranted
     @State private var diagnosticText = QuickShowHideService.shared.diagnosticSummary
     @State private var showsAboutPopover = false
@@ -119,6 +121,19 @@ struct ContentView: View {
                 sectionDivider
 
                 SettingToggleRow(
+                    title: "菜单栏图标",
+                    subtitle: "在菜单栏显示如窗图标，便于重新打开偏好设置",
+                    systemImage: "menubar.rectangle",
+                    tint: .indigo,
+                    style: .primary,
+                    isOn: $menuBarIconVisible
+                ) { _ in
+                    StatusItemController.shared.applyPreference()
+                }
+
+                sectionDivider
+
+                SettingToggleRow(
                     title: "登录时打开",
                     subtitle: launchAtLoginSubtitle,
                     systemImage: "power.circle.fill",
@@ -135,16 +150,16 @@ struct ContentView: View {
 
     private var dockPopupGroup: some View {
         VStack(spacing: 0) {
-            SettingToggleRow(
-                title: "Dock 信息弹窗",
-                subtitle: "多窗口：悬停 Dock 图标显示全部窗口",
-                systemImage: "macwindow.on.rectangle",
-                tint: .purple,
-                style: .primary,
-                isOn: $dockInfoPopupEnabled
-            ) { _ in
-                handleToggleChange()
-            }
+                SettingToggleRow(
+                    title: "Dock 信息弹窗",
+                    subtitle: "多窗口：悬停 Dock 显示自绘窗口列表（探测方式对齐 DockDoor）",
+                    systemImage: "macwindow.on.rectangle",
+                    tint: .purple,
+                    style: .primary,
+                    isOn: $dockInfoPopupEnabled
+                ) { _ in
+                    handleToggleChange()
+                }
 
             if dockInfoPopupEnabled {
                 NestedSettingsGroup(tint: .purple) {
@@ -172,13 +187,15 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 6) {
                 UsageLine(
                     label: "后台运行",
-                    detail: "关闭本窗口后如窗继续在后台运行并隐藏 Dock 图标；再次从启动台或应用程序打开即可"
+                    detail: menuBarIconVisible
+                        ? "关闭本窗口后如窗继续在后台运行并隐藏 Dock 图标；可通过菜单栏「如窗」图标再次打开偏好设置，或从启动台 / 应用程序打开"
+                        : "关闭本窗口后如窗继续在后台运行并隐藏 Dock 图标；可从启动台 / 应用程序再次打开偏好设置"
                 )
                 if quickShowHideEnabled {
                     UsageLine(label: "单窗口", detail: "点击 Dock 图标切换显示/隐藏")
                 }
                 if dockInfoPopupEnabled {
-                    UsageLine(label: "多窗口", detail: "悬停 Dock 图标查看窗口，移开即关闭")
+                    UsageLine(label: "多窗口", detail: "悬停查看窗口；点击标题切换，当前窗口再点则最小化")
                     UsageLine(
                         label: "排序",
                         detail: useSystemWindowOrder

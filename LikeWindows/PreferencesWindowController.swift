@@ -6,6 +6,13 @@
 import AppKit
 import SwiftUI
 
+/// 偏好设置窗口控制器。
+///
+/// ## Dock 图标策略
+/// - 打开偏好设置 → `.regular`：在 Dock 显示图标，方便用户找到
+/// - 关闭偏好设置 → `.accessory`：隐藏 Dock 图标，进程继续跑 Event Tap / 悬停
+///
+/// 窗口 `isReleasedWhenClosed = false`，关闭后可再次 `showWindow` 复用同一实例。
 final class PreferencesWindowController: NSObject, NSWindowDelegate {
     static let shared = PreferencesWindowController()
 
@@ -18,6 +25,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         super.init()
     }
 
+    /// 展示偏好设置；窗口已存在则前置，否则创建并嵌入 `ContentView`。
     func showWindow() {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [self] in
@@ -44,6 +52,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         window.minSize = Self.minimumSize
         window.center()
         window.delegate = self
+        // 关闭后保留窗口对象，避免反复创建 SwiftUI 宿主
         window.isReleasedWhenClosed = false
         self.window = window
 
@@ -55,11 +64,13 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         hideFromDock()
     }
 
+    /// 偏好设置打开时显示 Dock 图标并激活应用。
     private func showInDock() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
     }
 
+    /// 偏好设置关闭后隐藏 Dock 图标；Event Tap 等后台能力不受影响。
     private func hideFromDock() {
         NSApp.setActivationPolicy(.accessory)
     }

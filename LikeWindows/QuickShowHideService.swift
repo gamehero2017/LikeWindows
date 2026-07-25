@@ -6,15 +6,28 @@
 import AppKit
 import ApplicationServices
 
+/// Dock 点击防抖间隔，避免连点重复触发。
 private let clickDebounceInterval: TimeInterval = 0.15
 private let finderBundleIdentifier = "com.apple.finder"
 
+/// Dock 图标标题到 Bundle ID 的兜底映射（本地化标题不一致时用）。
 private let dockTitleBundleMap: [String: String] = [
     "访达": finderBundleIdentifier,
     "Finder": finderBundleIdentifier,
     "ファインダ": finderBundleIdentifier,
 ]
 
+/// CGEventTap 回调（在主 RunLoop 上触发）。
+///
+/// ## 返回值约定
+/// - `Unmanaged.passUnretained(event)`：放行，系统继续处理
+/// - `nil`：吞掉事件，系统 Dock 收不到这次点击
+///
+/// ## 处理顺序
+/// 1. Tap 被系统禁用 → 安排重启并放行
+/// 2. 非左键按下 → 放行
+/// 3. 点击不在 Dock 区域 → 放行（避免误拦桌面）
+/// 4. `handleDockClick` 成功 → 吞掉；失败 → 放行
 private func eventTapCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -27,6 +40,7 @@ private func eventTapCallback(
 
     let service = Unmanaged<QuickShowHideService>.fromOpaque(userInfo).takeUnretainedValue()
 
+    // 超时或用户输入导致 tap 被禁用时，必须重启，否则后续点击全部失效
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         service.scheduleEventTapRestart()
         return Unmanaged.passUnretained(event)
@@ -47,6 +61,21 @@ private func eventTapCallback(
     return Unmanaged.passUnretained(event)
 }
 
+/// Dock 点击拦截与命中解析服务。
+///
+/// ## 架构位置
+/// ```
+/// CGEventTap → handleDockClick → dockTarget → DockClickRouter
+///                                      ↘ 同时供悬停弹窗解析图标用
+/// ```
+///
+/// ## 关键状态
+/// - `eventTap` / `runLoopSource`：会话级鼠标监听
+/// - `frontmostPID`：由激活通知维护，避免每次查 `frontmostApplication`
+/// - `dockEntriesCache`：Dock 图标列表短时缓存，降低 AX 遍历频率
+/// - `dockTargetCache`：按点击坐标短时复用命中结果
+///
+/// `@unchecked Sendable`：Event Tap 回调与主线程共享实例，可变状态靠 `stateLock` / 主线程约定保护。
 final class QuickShowHideService: NSObject, @unchecked Sendable {
     static let shared = QuickShowHideService()
 
@@ -55,12 +84,14 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
     private var permissionTimer: Timer?
     private var lastClickTime: TimeInterval = 0
     private var lastClickedPID: pid_t = 0
+    /// 由 workspace 激活通知维护的前台 PID，供快速前台判断。
     private var frontmostPID: pid_t?
     private var isStarted = false
     private let stateLock = NSLock()
     private var preventAppNapActivity: NSObjectProtocol?
     private var dockTargetCache: (target: DockTarget, location: CGPoint, timestamp: Date)?
     private var regularAppsCache: ([NSRunningApplication], timestamp: Date)?
+    /// Dock 图标列表短时缓存，减少悬停/点击时的 AX 遍历。
     private var dockEntriesCache: [CachedDockEntry]?
     private var dockEntriesCacheTimestamp: Date?
 
@@ -80,6 +111,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         super.init()
     }
 
+    /// 启动权限轮询、前台监听与（按需）Event Tap。
     func start() {
         guard !isStarted else { return }
         isStarted = true
@@ -144,6 +176,10 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 按功能开关与权限，启停 Event Tap 与悬停监测。
+    ///
+    /// - 两个功能都关 → `enterDeepSleep`（停 tap、停权限轮询、挂起悬停）
+    /// - 任一功能开 → 启动权限定时器，并尝试重建 Event Tap
     private func applyRuntimeState() {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
@@ -163,6 +199,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         restartEventTapIfNeeded()
     }
 
+    /// 功能全关或进程停止时的深度休眠：释放监听资源，降低空闲占用。
     private func enterDeepSleep() {
         stopPermissionTimer()
         stopEventTap()
@@ -214,6 +251,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 权限稳定且 tap 已运行时用较长间隔（30s）；否则 5s 重试，便于用户授权后快速恢复。
     private func permissionTimerInterval() -> TimeInterval {
         if AXIsProcessTrusted(), isEventTapActive {
             return 30.0
@@ -227,6 +265,10 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 根据「授权 + AX 可用」决定是否运行 Event Tap，并同步悬停监测。
+    ///
+    /// `working` 判定：已信任，且（tap 已在跑 **或** AccessibilityHealth 探测通过）。
+    /// tap 已在跑时跳过探测，避免热路径反复 probe。
     func restartEventTapIfNeeded() {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
@@ -280,6 +322,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         NSWorkspace.shared.open(url)
     }
 
+    /// 是否已授予辅助功能权限（AXIsProcessTrusted）。
     var isAccessibilityGranted: Bool {
         guard AXIsProcessTrusted() else { return false }
         stateLock.lock()
@@ -294,6 +337,7 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
             || UserDefaults.standard.bool(forKey: AppSettings.dockInfoPopupEnabled)
     }
 
+    /// 偏好设置页展示的运行状态摘要文案。
     var diagnosticSummary: String {
         let trusted = AXIsProcessTrusted()
         let working = trusted && AccessibilityHealth.isWorking()
@@ -305,10 +349,17 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         return "快显:\(quickEnabled ? "开" : "关") 弹窗:\(popupEnabled ? "开" : "关") 授权:\(trusted ? "是" : "否") 可用:\(working ? "是" : "否") 监听:\(tap ? "运行中" : "未运行")"
     }
 
+    /// 判断 CG 坐标是否落在 Dock 热区内（含自动隐藏边缘）。
     func isClickLocationInDock(_ location: CGPoint) -> Bool {
         isMouseInDockRegion(location)
     }
 
+    /// 将屏幕坐标解析为命中的 Dock 应用图标。
+    ///
+    /// 查找顺序（由快到慢）：
+    /// 1. 坐标邻近的短时 `dockTargetCache`
+    /// 2. 预建的 `dockEntriesCache` 矩形命中
+    /// 3. 实时 AX 遍历 Dock 树 + 解析 running app
     func dockTarget(at location: CGPoint) -> DockTarget? {
         if let cached = dockTargetCache,
            Date().timeIntervalSince(cached.timestamp) < Self.dockTargetCacheTTL {
@@ -325,16 +376,22 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         }
 
         guard let dockItem = dockItem(at: location),
-              let app = resolveRunningApp(for: dockItem)
-                ?? resolveRunningAppFromFrontmost(matching: dockItem),
-              let iconRect = dockItemRect(dockItem) else {
+              let target = dockTarget(fromDockItem: dockItem) else {
             dockTargetCache = nil
             return nil
         }
 
-        let target = DockTarget(app: app, iconRect: iconRect)
         dockTargetCache = (target, location, Date())
         return target
+    }
+
+    /// 由 Dock AX 图标元素解析 `DockTarget`（悬停 SelectedChildren POC / 点击命中共用）。
+    func dockTarget(fromDockItem item: AXUIElement) -> DockTarget? {
+        guard let app = resolveRunningApp(for: item) ?? resolveRunningAppFromFrontmost(matching: item),
+              let iconRect = dockItemRect(item) else {
+            return nil
+        }
+        return DockTarget(app: app, iconRect: iconRect)
     }
 
     func prefetchDockEntriesCache() {
@@ -363,6 +420,8 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         isAppFrontmostInternal(app)
     }
 
+    /// 在主 RunLoop 上创建会话级左键 Event Tap（`.cgSessionEventTap` + `.headInsertEventTap`）。
+    /// 需辅助功能权限；创建失败时静默返回，由权限定时器稍后重试。
     private func startEventTap() {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
@@ -429,6 +488,10 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 处理 Dock 点击；返回 true 表示已消费事件。
+    ///
+    /// 前置：功能开启 + AccessibilityHealth 可用 + 必须在主线程。
+    /// 非主线程直接返回 false（放行），避免在 tap 回调里跨线程同步阻塞。
     func handleDockClick(at location: CGPoint) -> Bool {
         guard isAnyFeatureEnabled else { return false }
         guard AccessibilityHealth.isWorking() else { return false }
@@ -437,6 +500,8 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         return handleDockClickOnMain(at: location)
     }
 
+    /// 解析点击位置对应的 Dock 图标，并交给 `DockClickRouter`。
+    /// 每次点击前失效图标缓存，避免 Dock 布局变化后命中旧矩形。
     private func handleDockClickOnMain(at location: CGPoint) -> Bool {
         guard isClickLocationInDock(location) else { return false }
         invalidateDockTargetCache()
@@ -457,6 +522,8 @@ final class QuickShowHideService: NSObject, @unchecked Sendable {
         lastClickedPID = app.processIdentifier
     }
 
+    /// 同 App 在 `clickDebounceInterval` 内的重复点击返回 false。
+    /// 注意：当前在「允许处理」时即 `recordClick`，若后续隐藏失败，短时间内再点会被防抖挡住。
     func shouldProcessClick(for app: NSRunningApplication) -> Bool {
         let now = Date().timeIntervalSince1970
         if app.processIdentifier == lastClickedPID,
@@ -633,6 +700,8 @@ private extension QuickShowHideService {
         return result
     }
 
+    /// 前台判断：`isActive` → 缓存的 `frontmostPID` → 实时 `frontmostApplication`。
+    /// 多层兜底是因为激活通知与 `isActive` 在某些切换瞬间可能短暂不一致。
     func isAppFrontmostInternal(_ app: NSRunningApplication) -> Bool {
         if app.isActive { return true }
         if let frontmostPID, frontmostPID == app.processIdentifier { return true }
@@ -744,6 +813,8 @@ private func normalizedAppPath(_ url: URL) -> String {
     url.resolvingSymlinksInPath().path
 }
 
+/// 判断 CG 坐标是否落在「屏幕可见区之外」的 Dock 条带（底部/侧边 Dock）。
+/// 菜单栏附近（frame.maxY - 30）排除，避免与菜单栏点击混淆。
 private func isMouseInDockRegion(_ location: CGPoint) -> Bool {
     guard let primaryHeight = NSScreen.screens.first?.frame.height else { return false }
     let cocoaPoint = NSPoint(x: location.x, y: primaryHeight - location.y)
@@ -751,10 +822,12 @@ private func isMouseInDockRegion(_ location: CGPoint) -> Bool {
     for screen in NSScreen.screens {
         guard NSPointInRect(cocoaPoint, screen.frame) else { continue }
 
+        // 落在可见内容区 → 不是 Dock
         if NSPointInRect(cocoaPoint, screen.visibleFrame) {
             return false
         }
 
+        // 靠近屏幕顶部菜单栏区域 → 不是 Dock
         if cocoaPoint.y > screen.frame.maxY - 30 {
             return false
         }

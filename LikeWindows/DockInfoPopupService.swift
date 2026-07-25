@@ -6,17 +6,33 @@
 import AppKit
 import SwiftUI
 
+/// Dock 悬停信息弹窗服务。
+///
+/// ## 产品边界
+/// - **多窗口展示**：自绘标题列表（不截图预览）
+/// - **悬停 / 弹窗生命周期**：DockDoor 方式（`AXSelectedChildren` + 延迟显示 + 弹窗内保持）
+/// - **快速显示/隐藏**：独立 Event Tap 路径，不受本服务影响
+///
+/// ## 展示条件
+/// `popupSnapshot.shouldShow == true`（可追踪窗口数 > 1）才会弹出。
 final class DockInfoPopupService: NSObject {
     static let shared = DockInfoPopupService()
 
+    /// 活跃监测时的兜底轮询间隔（SelectedChildren 漏通知时补位）。
     private static let activeFallbackPollInterval: TimeInterval = 0.9
+    /// 弹窗内容刷新最小间隔（非 force）。
     private static let popupRefreshInterval: TimeInterval = 0.4
+    /// 鼠标移动距离小于此值则跳过处理（像素平方比较用）。
     private static let mouseMoveThreshold: CGFloat = 5.0
-    private static let hoverProcessInterval: CFTimeInterval = 1.0 / 15.0
+    /// 在不同 Dock 图标间快速滑动时的切换防抖。
     private static let dockSwitchDebounce: TimeInterval = 0.1
+    /// 首次打开弹窗的悬停延迟（对齐 DockDoor `hoverWindowOpenDelay` 量级）。
+    private static let hoverOpenDelay: TimeInterval = 0.2
 
     private enum MonitoringPhase {
+        /// 无 Dock 选中：低负载。
         case idle
+        /// 有选中或弹窗已显示。
         case active
     }
 
@@ -34,14 +50,18 @@ final class DockInfoPopupService: NSObject {
     private var isPopupPresented = false
     private var isStarted = false
     private var isMouseNearDock = false
+    /// 鼠标是否在自绘弹窗内（SelectedChildren 清空时据此保持展示）。
+    private var mouseIsWithinPopup = false
     private var lastPopupRefreshTime: TimeInterval = 0
     private var lastWindowStateSignature: String?
     private var lastFrontmostState: Bool?
     private var lastPopupAnchor: CGRect?
     private var pendingPresentTarget: DockTarget?
-    private var isPresentQueued = false
-    private var lastHoverProcessTime: CFTimeInterval = 0
+    private var pendingShowWorkItem: DispatchWorkItem?
     private var lastDockSwitchTime: TimeInterval = 0
+
+    /// DockDoor 式悬停探测。
+    private let hoverProbe = DockAXHoverProbe()
 
     var isPopupVisible: Bool {
         isPopupPresented
@@ -51,13 +71,14 @@ final class DockInfoPopupService: NSObject {
         super.init()
     }
 
+    /// 按当前开关与权限状态，重新启动或停止悬停监测。
     func refreshMonitoring() {
         runOnMain { [weak self] in
             self?.restartHoverMonitorIfNeeded()
         }
     }
 
-    /// 关闭全部鼠标监听与轮询（功能关闭或深度休眠时调用）
+    /// 关闭全部鼠标监听与轮询（功能关闭或深度休眠时调用）。
     func suspendMonitoring() {
         runOnMain { [weak self] in
             self?.stopAllMonitoring()
@@ -65,6 +86,7 @@ final class DockInfoPopupService: NSObject {
         }
     }
 
+    /// 启动悬停监测（受功能开关与辅助功能权限约束）。
     func start() {
         guard !isStarted else { return }
         isStarted = true
@@ -79,6 +101,7 @@ final class DockInfoPopupService: NSObject {
         restartHoverMonitorIfNeeded()
     }
 
+    /// 停止监测并关闭弹窗。
     func stop() {
         runOnMain { [weak self] in
             guard let self else { return }
@@ -119,13 +142,14 @@ final class DockInfoPopupService: NSObject {
             return
         }
 
+        ensureHoverProbe()
         ensureMouseMonitor()
 
         let mouse = NSEvent.mouseLocation
-        let nearDock = QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse)
-        isMouseNearDock = nearDock
+        let target = hoverProbe.refreshFromDock()
+        isMouseNearDock = (target != nil)
 
-        if isPopupPresented || nearDock {
+        if isPopupPresented || target != nil {
             enterActiveMonitoring()
             processHover(at: mouse)
         } else {
@@ -134,12 +158,34 @@ final class DockInfoPopupService: NSObject {
     }
 
     private func stopAllMonitoring() {
+        hoverProbe.onSelectionChanged = nil
+        hoverProbe.stop()
+        cancelPendingShow()
         removeMouseMonitor()
         stopFallbackPoll()
         monitoringPhase = .idle
         cachedHoverTarget = nil
         isMouseNearDock = false
+        mouseIsWithinPopup = false
         lastMouseLocation = nil
+    }
+
+    private func ensureHoverProbe() {
+        hoverProbe.onSelectionChanged = { [weak self] in
+            self?.handleProbeSelectionChanged()
+        }
+        hoverProbe.start()
+    }
+
+    private func handleProbeSelectionChanged() {
+        guard isMonitoringEnabled else { return }
+        let mouse = NSEvent.mouseLocation
+        mouseIsWithinPopup = isMouseOverPanel(mouse)
+        // 鼠标移向弹窗时 SelectedChildren 常会清空，不能据此关窗
+        if isPopupPresented, mouseIsWithinPopup, hoverProbe.currentTarget == nil {
+            return
+        }
+        processHover(at: mouse)
     }
 
     private func ensureMouseMonitor() {
@@ -174,29 +220,28 @@ final class DockInfoPopupService: NSObject {
 
     private func handleMouseMoved() {
         let mouse = NSEvent.mouseLocation
+        mouseIsWithinPopup = isPopupPresented && isMouseOverPanel(mouse)
 
-        if isPopupPresented, isMouseOverPanel(mouse) {
-            refreshCurrentPopupOnMain(force: false)
+        if mouseIsWithinPopup {
             return
         }
 
         switch monitoringPhase {
         case .idle:
             guard isMonitoringEnabled, !isPopupPresented else { return }
-            guard QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse) else { return }
-            isMouseNearDock = true
-            enterActiveMonitoring()
-            lastMouseLocation = mouse
-            processHover(at: mouse)
+            if hoverProbe.refreshFromDock() != nil {
+                isMouseNearDock = true
+                enterActiveMonitoring()
+                lastMouseLocation = mouse
+                processHover(at: mouse)
+            }
 
         case .active:
             guard !shouldSkipMouseMove(to: mouse) else { return }
             lastMouseLocation = mouse
-
-            let now = CACurrentMediaTime()
-            guard now - lastHoverProcessTime >= Self.hoverProcessInterval else { return }
-            lastHoverProcessTime = now
-            processHover(at: mouse)
+            if isPopupPresented {
+                processHover(at: mouse)
+            }
         }
     }
 
@@ -225,10 +270,8 @@ final class DockInfoPopupService: NSObject {
     }
 
     private func enterActiveMonitoring() {
-        if monitoringPhase == .idle {
-            QuickShowHideService.shared.prefetchDockEntriesCache()
-        }
         monitoringPhase = .active
+        ensureHoverProbe()
         ensureMouseMonitor()
         scheduleFallbackPoll(interval: Self.activeFallbackPollInterval)
     }
@@ -240,29 +283,56 @@ final class DockInfoPopupService: NSObject {
         return (dx * dx + dy * dy) < Self.mouseMoveThreshold * Self.mouseMoveThreshold
     }
 
+    /// 排队展示悬停弹窗（DockDoor：首次延迟，已显示则立即切换）。
     private func presentOnMain(_ target: DockTarget) {
         guard UserDefaults.standard.bool(forKey: dockInfoPopupEnabledKey) else { return }
 
-        // 弹窗已显示时同步切换内容，避免窗口标题列表落后鼠标
         if isPopupPresented {
+            cancelPendingShow()
             pendingPresentTarget = nil
             presentTargetImmediately(target)
             return
         }
 
         pendingPresentTarget = target
-        guard !isPresentQueued else { return }
-        isPresentQueued = true
+        cancelPendingShow()
 
-        DispatchQueue.main.async { [weak self] in
+        let expectedPID = target.processIdentifier
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.isPresentQueued = false
-            guard let target = self.pendingPresentTarget else { return }
+            self.pendingShowWorkItem = nil
+
+            // 延迟结束后仍须悬停在同一图标上
+            let current = self.hoverProbe.refreshFromDock()
+            guard let current,
+                  current.processIdentifier == expectedPID,
+                  let pending = self.pendingPresentTarget,
+                  pending.processIdentifier == expectedPID else {
+                return
+            }
+
+            // 鼠标已进弹窗且目标 App 不同时，不抢切（对齐 DockDoor）
+            if self.mouseIsWithinPopup,
+               let shownPID = self.currentTargetPID,
+               shownPID != expectedPID {
+                return
+            }
+
             self.pendingPresentTarget = nil
-            self.presentTargetImmediately(target)
+            self.presentTargetImmediately(current)
         }
+
+        pendingShowWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverOpenDelay, execute: workItem)
     }
 
+    private func cancelPendingShow() {
+        pendingShowWorkItem?.cancel()
+        pendingShowWorkItem = nil
+    }
+
+    /// 真正创建/更新弹窗：快照窗口列表 → 算布局 → 写入 model → orderFront。
+    /// `shouldShow == false`（≤1 个窗口）时不展示。
     private func presentTargetImmediately(_ target: DockTarget) {
         if currentTargetPID != target.processIdentifier {
             AppWindowInspector.invalidateWindowCache(for: target.processIdentifier)
@@ -346,12 +416,15 @@ final class DockInfoPopupService: NSObject {
             || abs(lastPopupAnchor.width - anchor.width) > tolerance
     }
 
+    /// 强制刷新当前弹窗的窗口列表与布局。
     func refreshCurrentPopup() {
         runOnMain { [weak self] in
             self?.refreshCurrentPopupOnMain(force: true)
         }
     }
 
+    /// 刷新弹窗内容；非 force 时受刷新间隔与「窗口状态签名」节流。
+    /// 签名未变且前台状态未变则跳过 UI 更新，减少 SwiftUI 抖动。
     private func refreshCurrentPopupOnMain(force: Bool = false) {
         guard isPopupPresented,
               let pid = currentTargetPID,
@@ -404,6 +477,7 @@ final class DockInfoPopupService: NSObject {
         )
     }
 
+    /// 立即关闭弹窗并清理当前目标状态。
     func dismissImmediately() {
         runOnMain { [weak self] in
             self?.dismissImmediatelyOnMain()
@@ -411,6 +485,7 @@ final class DockInfoPopupService: NSObject {
     }
 
     private func dismissImmediatelyOnMain() {
+        cancelPendingShow()
         pendingPresentTarget = nil
 
         guard isPopupPresented else { return }
@@ -421,6 +496,7 @@ final class DockInfoPopupService: NSObject {
 
         panel?.orderOut(nil)
         isPopupPresented = false
+        mouseIsWithinPopup = false
         currentTargetPID = nil
         currentIconRect = nil
         cachedHoverTarget = nil
@@ -431,9 +507,12 @@ final class DockInfoPopupService: NSObject {
     }
 
     private func pollMouseHover() {
+        // 兜底轮询强制重读 SelectedChildren，补漏通知
+        _ = hoverProbe.refreshFromDock()
         processHover(at: NSEvent.mouseLocation)
     }
 
+    /// DockDoor 式悬停决策：SelectedChildren 驱动；弹窗内保持；无选中则关。
     private func processHover(at mouse: NSPoint) {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
@@ -441,6 +520,8 @@ final class DockInfoPopupService: NSObject {
             }
             return
         }
+
+        mouseIsWithinPopup = isPopupPresented && isMouseOverPanel(mouse)
 
         defer {
             if isMonitoringEnabled {
@@ -456,47 +537,39 @@ final class DockInfoPopupService: NSObject {
 
         guard isMonitoringEnabled else { return }
 
-        if isPopupPresented, isMouseOverPanel(mouse) {
+        if mouseIsWithinPopup {
+            // 弹窗内只节流刷新内容，不重复扫 Dock AX
             refreshCurrentPopupOnMain(force: false)
             return
         }
 
-        let nearDock = QuickShowHideService.shared.isMouseOverDock(cocoaPoint: mouse)
-        isMouseNearDock = nearDock
+        // Probe 已缓存则直接用；仅缓存为空时再读 AX（漏通知由 fallback 强制刷新）
+        let target = hoverProbe.currentTarget ?? hoverProbe.refreshFromDock()
+        isMouseNearDock = (target != nil)
+        cachedHoverTarget = target
 
-        if !nearDock && !isPopupPresented {
-            cachedHoverTarget = nil
+        if let target {
+            if isPopupPresented {
+                pollWhilePopupVisible(target: target)
+            } else {
+                pollWhilePopupHidden(target: target)
+            }
             return
         }
 
+        // 离开 Dock 且不在弹窗上：取消延迟展示并关闭
+        cancelPendingShow()
+        pendingPresentTarget = nil
         if isPopupPresented {
-            pollWhilePopupVisible(mouse: mouse, nearDock: nearDock)
-        } else if nearDock {
-            pollWhilePopupHidden(mouse: mouse)
+            dismissImmediatelyOnMain()
         }
     }
 
-    private func pollWhilePopupVisible(mouse: NSPoint, nearDock: Bool) {
-        if isMouseOverPanel(mouse) {
-            return
-        }
-
-        guard nearDock else {
-            dismissImmediatelyOnMain()
-            return
-        }
-
-        if isMouseOverCurrentIcon(mouse) {
+    /// 弹窗已显示：仍悬停当前图标则刷新；换到另一多窗 App 则切换；否则关闭。
+    private func pollWhilePopupVisible(target: DockTarget) {
+        if target.processIdentifier == currentTargetPID {
+            currentIconRect = target.iconRect
             refreshCurrentPopupOnMain(force: false)
-            return
-        }
-
-        guard let target = dockTargetUnderMouse(mouse) else {
-            dismissImmediatelyOnMain()
-            return
-        }
-
-        guard target.processIdentifier != currentTargetPID else {
             return
         }
 
@@ -513,9 +586,8 @@ final class DockInfoPopupService: NSObject {
         presentOnMain(target)
     }
 
-    private func pollWhilePopupHidden(mouse: NSPoint) {
-        guard let target = dockTargetUnderMouse(mouse) else { return }
-
+    /// 弹窗未显示：命中多窗口 Dock 图标则 present。
+    private func pollWhilePopupHidden(target: DockTarget) {
         if let currentPID = currentTargetPID, target.processIdentifier == currentPID, isPopupPresented {
             return
         }
@@ -529,43 +601,6 @@ final class DockInfoPopupService: NSObject {
     private func isMouseOverPanel(_ mouse: NSPoint) -> Bool {
         guard isPopupPresented, let panel else { return false }
         return panel.frame.insetBy(dx: -2, dy: -2).contains(mouse)
-    }
-
-    private func isMouseOverCurrentIcon(_ mouse: NSPoint) -> Bool {
-        guard currentTargetPID != nil else { return false }
-
-        if let iconRect = currentIconRect {
-            let cgMouse = QuickShowHideService.shared.cgPointFromCocoa(mouse)
-            if iconRect.insetBy(dx: -4, dy: -4).contains(cgMouse) {
-                return true
-            }
-        }
-
-        guard let target = dockTargetUnderMouse(mouse),
-              target.processIdentifier == currentTargetPID else {
-            return false
-        }
-        currentIconRect = target.iconRect
-        return true
-    }
-
-    private func dockTargetUnderMouse(_ mouse: NSPoint) -> DockTarget? {
-        if let cached = cachedHoverTarget {
-            let cgMouse = QuickShowHideService.shared.cgPointFromCocoa(mouse)
-            let hitRect = cached.iconRect.insetBy(dx: -4, dy: -4)
-            if hitRect.contains(cgMouse) {
-                return cached
-            }
-        }
-
-        let cgPoint = QuickShowHideService.shared.cgPointFromCocoa(mouse)
-        guard let target = QuickShowHideService.shared.dockTarget(at: cgPoint) else {
-            cachedHoverTarget = nil
-            return nil
-        }
-
-        cachedHoverTarget = target
-        return target
     }
 
     private static func windowsStateSignature(_ windows: [DockWindowInfo]) -> String {
@@ -589,6 +624,7 @@ final class DockInfoPopupService: NSObject {
         }
     }
 
+    /// 懒创建无边框非激活面板，承载 SwiftUI 弹窗内容。
     private func ensurePanel() -> NSPanel {
         if let panel {
             return panel

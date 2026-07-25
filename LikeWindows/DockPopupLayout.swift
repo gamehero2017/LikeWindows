@@ -5,7 +5,9 @@
 
 import AppKit
 
+/// Dock 悬停弹窗的尺寸与布局计算结果（宽度、列表高度、行高、是否滚动等）。
 struct DockPopupLayout {
+    /// 窗口较多或空间不足时使用紧凑行高。
     enum Density {
         case standard
         case compact
@@ -47,6 +49,7 @@ struct DockPopupLayout {
         return rowHeights[index]
     }
 
+    /// 根据应用名、窗口列表与 Dock 图标锚点，计算弹窗布局。
     static func calculate(
         appName: String,
         windows: [DockWindowInfo],

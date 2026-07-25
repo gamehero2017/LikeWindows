@@ -3,9 +3,11 @@
 //  likeWindows
 //
 
+import AppKit
 import Observation
 import SwiftUI
 
+/// 悬停弹窗的可变数据模型，供 SwiftUI 视图绑定刷新。
 @Observable
 final class DockInfoPopupModel {
     var appName: String
@@ -29,6 +31,7 @@ final class DockInfoPopupModel {
     }
 }
 
+/// Dock 悬停信息弹窗 UI：应用头、窗口列表与最小化/最大化/关闭按钮。
 struct DockInfoPopupView: View {
     @Bindable var model: DockInfoPopupModel
 
@@ -126,8 +129,20 @@ struct DockInfoPopupView: View {
     }
 
     private var windowList: some View {
+        WindowListView(windows: model.windows, layout: layout)
+    }
+}
+
+private struct WindowListView: View {
+    let windows: [DockWindowInfo]
+    let layout: DockPopupLayout
+
+    /// 列表级互斥高亮（对齐 DockDoor `currIndex`）：进入新行直接覆盖，不依赖上一行 ended。
+    @State private var hoveredWindowID: String?
+
+    var body: some View {
         VStack(spacing: 0) {
-            ForEach(Array(model.windows.enumerated()), id: \.element.id) { index, window in
+            ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
                 if index > 0 {
                     Divider()
                         .opacity(0.22)
@@ -137,12 +152,20 @@ struct DockInfoPopupView: View {
                 WindowRow(
                     window: window,
                     index: index + 1,
-                    contentWidth: layout.width,
                     layout: layout,
-                    rowHeight: layout.rowHeight(at: index)
+                    rowHeight: layout.rowHeight(at: index),
+                    isHovered: hoveredWindowID == window.id,
+                    onHoverChange: { hovering in
+                        if hovering {
+                            hoveredWindowID = window.id
+                        } else if hoveredWindowID == window.id {
+                            hoveredWindowID = nil
+                        }
+                    }
                 )
             }
         }
+        .animation(nil, value: hoveredWindowID)
     }
 }
 
@@ -173,11 +196,10 @@ private struct StatusBadge: View {
 private struct WindowRow: View {
     let window: DockWindowInfo
     let index: Int
-    let contentWidth: CGFloat
     let layout: DockPopupLayout
     let rowHeight: CGFloat
-
-    @State private var isRowHovered = false
+    let isHovered: Bool
+    let onHoverChange: (Bool) -> Void
 
     private var isCompact: Bool {
         layout.density == .compact
@@ -218,26 +240,40 @@ private struct WindowRow: View {
             .buttonStyle(PopupPlainButtonStyle())
             .focusable(false)
             .focusEffectDisabled()
-            .background {
-                RoundedRectangle(cornerRadius: isCompact ? 8 : 10, style: .continuous)
-                    .fill(Color.primary.opacity(isRowHovered ? 0.06 : 0))
-            }
-            .onHover { isRowHovered = $0 }
-            .accessibilityLabel("打开窗口：\(window.title)")
+            .accessibilityLabel(window.isMinimized ? "恢复窗口：\(window.title)" : "切换窗口：\(window.title)")
 
             WindowsWindowControls(window: window, isCompact: isCompact)
         }
         .padding(.horizontal, isCompact ? 6 : 8)
         .padding(.vertical, isCompact ? 5 : 7)
         .frame(maxWidth: .infinity, minHeight: rowHeight, maxHeight: rowHeight, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: isCompact ? 8 : 10, style: .continuous)
+                .fill(Color.primary.opacity(isHovered ? 0.08 : 0))
+        }
+        .contentShape(Rectangle())
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                onHoverChange(true)
+            case .ended:
+                onHoverChange(false)
+            }
+        }
     }
 
+    /// 点击行：已是前台焦点窗则最小化并刷新列表；否则关闭弹窗并激活该窗口。
     private func openWindow() {
-        DockInfoPopupService.shared.dismissImmediately()
-        _ = AppWindowInspector.activateWindow(window)
+        let didMinimize = AppWindowInspector.activateOrMinimizeFromPopup(window)
+        if didMinimize {
+            DockInfoPopupService.shared.refreshCurrentPopup()
+        } else {
+            DockInfoPopupService.shared.dismissImmediately()
+        }
     }
 }
 
+/// 仿 Windows 风格的最小化 / 最大化 / 关闭按钮组。
 private struct WindowsWindowControls: View {
     let window: DockWindowInfo
     let isCompact: Bool

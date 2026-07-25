@@ -28,10 +28,10 @@ fi
 
 VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist")"
 BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Contents/Info.plist")"
-DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+DMG_NAME="${APP_NAME}-${VERSION}(${BUILD_NUMBER}).dmg"
 DMG_PATH="$EXPORT_DIR/$DMG_NAME"
 
-echo "==> Preparing DMG staging (${VERSION} build ${BUILD_NUMBER})..."
+echo "==> Preparing DMG staging (${VERSION}(${BUILD_NUMBER}))..."
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR" "$EXPORT_DIR"
 ditto "$APP_PATH" "$STAGING_DIR/${APP_NAME}.app"
